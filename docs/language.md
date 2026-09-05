@@ -5,10 +5,12 @@ This is a small structured BASIC dialect for embedded scripts.
 ## Values and expressions
 
 Identifiers and keywords are case-insensitive. Identifiers start with a
-letter or underscore, followed by letters, digits, or underscores. Scalar
-variables are implicitly declared and begin as integer zero. A value holds
-an `int32` or a finite `float64`. Floats are enabled by default. Arrays and
-parameters can hold either kind.
+letter or underscore, followed by letters, digits, or underscores, with an
+optional trailing `$` for strings. Scalar variables are implicitly declared.
+Numeric variables begin as integer zero and hold an `int32` or a finite
+`float64`. Floats are enabled by default. String variables begin as `""`.
+Arrays and parameters use the same suffix rule. `name` and `name$` are
+distinct variables.
 
 Integer literals retain their int32 range. Decimal points or exponents make
 floating-point literals, such as `1.5`, `.25`, `2.`, `1e-3`, or `2.5D+2`.
@@ -326,13 +328,14 @@ addScore(7)
 call addScore(3)
 ```
 
-Parameters are local numeric values passed by value. Other scalar variables
+Parameters are local values passed by value. Use a `$` suffix for string
+parameters, such as `sub greet(name$)`. Argument types must match. Other scalar variables
 are global. Subroutines can call each other and recurse within the configured
 call depth. `exit sub` and `end sub` exit the entire procedure, including any
 pending `gosub` calls inside it. For compatibility with earlier versions of
 this library, a bare `return` also exits a `sub` when there is no pending
-`gosub` in that call. Native host functions can return numeric values and appear
-in expressions.
+`gosub` in that call. Native host functions can return numbers or strings and appear
+in expressions. String-returning host functions require a `$` suffix.
 
 ## Output and literals
 
@@ -345,12 +348,122 @@ A comma inserts one space. A semicolon concatenates items, and a trailing
 semicolon suppresses the newline. Double a quote inside a quoted literal
 to include a quote character.
 
-Quoted literals can appear in `print` and directly as call arguments. A
-literal passed to a function becomes a compiled literal ID. A host callback
-can resolve it with `program.literal(id)`. It is distinct from a string pool
-handle.
+Quoted literals are string expressions and can appear in assignments,
+comparisons, calls, and output. String output uses `TextPrint`. A literal
+printed on its own can be emitted directly from the compiled program.
 
-## Optional string functions
+For compatibility, a standalone quoted argument to an integer `HostProc`
+still becomes a compiled literal ID, resolved with `program.literal(id)`.
+This preserves existing calls such as `strNew("text")`. Calls to SUBs,
+built-in string functions, and `NumericHostProc` receive actual string
+values. Literal IDs, legacy pool handles, and native strings are distinct.
+
+## Native strings
+
+String syntax works without registering any host functions:
+
+```basic
+name$ = "Ada"
+greeting$ = "Hello, " + name$ + "!"
+dim names$(3)
+names$(0) = name$
+if names$(0) = "Ada" then print greeting$
+```
+
+`+` concatenates strings. `=`, `<>`, `<`, `<=`, `>`, and `>=` compare their
+contents case-sensitively and return -1 or 0. String selectors also work in
+`select case`, including ranges and `case is` comparisons. Assignment and
+SUB arguments copy a string reference by value. Strings are immutable.
+Numeric and string operands cannot be mixed, and strings cannot be used as
+Boolean conditions. Use `LEN(text$) > 0` to test for nonempty text.
+
+| Built-in function | Result |
+| --- | --- |
+| `LEN(s$)` | Byte length. |
+| `LEFT$(s$, n)` / `RIGHT$(s$, n)` | Up to `n` bytes from either edge. |
+| `MID$(s$, start[, n])` | Up to `n` bytes, or the remaining suffix. |
+| `INSTR([start,] s$, needle$)` | One-based match position, or 0. |
+| `UCASE$(s$)` / `LCASE$(s$)` | ASCII letter case conversion. |
+| `TRIM$(s$)` / `LTRIM$(s$)` / `RTRIM$(s$)` | Remove ASCII spaces at either edge. |
+| `CHR$(n)` | One byte with a code from 0 through 255. |
+| `ASC(s$)` | First byte's code. Empty input is an error. |
+| `SPACE$(n)` | `n` spaces. |
+| `STRING$(n, code)` / `STRING$(n, s$)` | Repeat a byte code or the first byte of nonempty text. |
+| `STR$(n)` | Numeric text, with a leading space for nonnegative values. |
+
+Positions are one-based and must be positive. Lengths must be nonnegative.
+Substring lengths clamp to the available bytes, and a start past the end
+produces an empty substring or an unsuccessful search. An empty INSTR needle
+matches at the start position if it is within the input string. Integer
+arguments require exact int32 values, including when floats are enabled.
+Strings hold bytes, including NUL and UTF-8, but indexing and case conversion
+are not Unicode character operations. Numeric formatting uses the VM's
+existing decimal formatter rather than reproducing every QBasic format.
+Native strings also work with `disableFloats = true`.
+
+### String limits and lifetime
+
+`Limits.maxStrings`, `maxStringBytes`, and `maxStringLength` bound native
+string storage. Defaults are 256 slots, 64 KiB of stored bytes, and 1024 bytes
+per string. Slot zero holds the shared empty string and counts toward the
+slot limit. Exceeding any limit raises `BasicError`, without truncation.
+
+Each runtime owns its string storage. Literals are copied once per reset,
+assignments share immutable references, and substrings use views without
+copying bytes. New strings and substring views consume slots until `reset`.
+Overwriting a variable does not immediately reclaim its old string. String
+churn can therefore exhaust the limits even if only a few variables remain.
+
+`restart` preserves globals, arrays, strings, and bound host data while
+restarting execution budgets. `reset` empties globals and arrays and reclaims
+string storage, preserving the current bound host data. References retained
+by Nim code across `reset` become invalid. Foreign runtime references and
+stale references raise `BasicError`. Use `getString` to copy text into Nim
+before reset if the host needs to retain it.
+
+Storage is allocated up front only when the program uses native strings.
+The runtime memory budget includes both byte arenas, span tables, reset
+scratch buffers, and the literal cache. Their logical capacity is
+`6 * maxStringBytes + 20 * maxStrings + 4 * program.literalCount` bytes.
+Value cells remain 16 bytes. Compiled source/literals, allocator overhead,
+and memory allocated by trusted callbacks remain outside that budget.
+`runtime.stringCount` and `runtime.stringBytes` report occupied storage.
+
+String copying, concatenation, comparison, transformation, search, and native
+string output charge size-dependent work to `maxWorkUnits`. Search charges
+its worst-case comparison count before scanning. Output also counts actual
+text bytes against `maxPrintBytes` before invoking the callback. Hosts must
+still bound their own callbacks and any work performed outside the VM.
+
+### Strings in Nim
+
+```nim
+var host = initHost()
+discard host.addData("message$", "attack")
+let program = compile("reply$ = UCASE$(message$)", host)
+var runtime = initRuntime(program, host)
+discard runtime.run
+doAssert runtime.getStringGlobal("reply$") == "ATTACK"
+runtime.setGlobal("reply$", "hold")
+runtime.setData("message$", "defend")
+```
+
+`setGlobal`, `setArray`, and `setData` accept Nim strings for `$` names.
+Read them with `getStringGlobal`, `getStringArray`, and `getStringData`.
+`getGlobalValue`, `getArrayValue`, and runtime `getDataValue` also return
+`StringValue` references. Resolve those with `runtime.getString(value)`.
+Numeric accessors and operators on `Value` reject strings because they lack
+the owning runtime needed to read their contents.
+
+`NumericHostProc` accepts `Value` arguments of either type despite its
+historical name. A function registered with a `$` suffix must return a
+string reference owned by the calling runtime, created with
+`runtime.putString(text)` or taken from an existing argument. Functions
+without that suffix must return a number. Result types are checked even
+when the caller discards the result. Bind callbacks to the runtime whose
+storage they use. See [the native string example](../examples/natural_strings.nim).
+
+## Optional handle-based string functions
 
 These functions are available only after the host registers
 `addStringFunctions`. All string offsets and lengths are byte-based.
@@ -386,7 +499,7 @@ equal text can have different handles.
 
 ## Unsupported features
 
-There are no multidimensional arrays, native string
-variables, script-defined value-returning functions, `on error` handlers, or
+There are no multidimensional arrays, fixed-length strings, `MID$` assignment,
+`VAL`, script-defined value-returning functions, `on error` handlers, or
 built-in file, network, or console input operations. The host chooses the
 native capabilities exposed to scripts.

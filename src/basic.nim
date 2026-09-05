@@ -1,15 +1,18 @@
 ## A BASIC compiler and metered register-machine interpreter.
-## Scripts use int32 and optional float64 values, arrays, and local jumps.
-## Runtimes preallocate numeric storage and bind trusted native callbacks.
+## Scripts use numbers, bounded strings, arrays, and local jumps.
+## Runtimes preallocate value storage and bind trusted native callbacks.
 ## Optional handle-based strings have separately bounded pools.
 
 import
   std/[strutils, tables],
-  basic/numbers
+  basic/[numbers, texts]
 
 export numbers
 
 const
+  DefaultMaxStrings* = 256
+  DefaultMaxStringBytes* = 64 * 1024
+  DefaultMaxStringLength* = 1024
   DefaultMaxSourceBytes* = 1 * 1024 * 1024
   DefaultMaxCodeInstructions* = 1_000_000
   DefaultMaxArrays* = 256
@@ -38,6 +41,9 @@ const
 
 type
   Limits* = object
+    maxStrings*: int
+    maxStringBytes*: int
+    maxStringLength*: int
     disableFloats*: bool
     maxSourceBytes*: int
     maxCodeInstructions*: int
@@ -89,6 +95,7 @@ type
   Host* = object
     dataNames: seq[string]
     dataValues: seq[Value]
+    dataStrings: seq[string]
     dataIds: OrderedTable[string, int32]
     functions: seq[HostFunction]
     functionIds: OrderedTable[string, int32]
@@ -134,6 +141,8 @@ type
     MeterOp,
     LoadImmediateOp,
     LoadFloatOp,
+    LoadStringOp,
+    TextCallOp,
     MoveOp,
     LoadGlobalOp,
     LoadHostDataOp,
@@ -222,6 +231,7 @@ type
 
   Program* = ref object
     ## A ref so sharing a program copies the handle, not the bytecode.
+    usesStrings: bool
     disableFloats: bool
     floats: seq[float64]
     code: seq[Instruction]
@@ -252,6 +262,8 @@ type
 
   Runtime* = ref object
     program: Program
+    strings: TextStorage
+    stringLiterals: seq[int32]
     limits: Limits
     globals: seq[Value]
     memory: seq[Value]
@@ -273,6 +285,7 @@ type
     finished: bool
 
   Expr = object
+    text: bool
     constant: bool
     value: Value
     reg: int32
@@ -323,6 +336,9 @@ type
 proc defaultLimits*(): Limits =
   ## Returns conservative defaults suitable for untrusted scripts.
   Limits(
+    maxStrings: DefaultMaxStrings,
+    maxStringBytes: DefaultMaxStringBytes,
+    maxStringLength: DefaultMaxStringLength,
     maxSourceBytes: DefaultMaxSourceBytes,
     maxCodeInstructions: DefaultMaxCodeInstructions,
     maxArrays: DefaultMaxArrays,
@@ -355,6 +371,13 @@ proc fail(token: Token, message: string)
 
 proc validate(limits: Limits) =
   ## Rejects limits that could disable a sandbox boundary.
+  if limits.maxStrings < 1 or limits.maxStringBytes < 1 or
+    limits.maxStringLength < 1 or
+    limits.maxStringLength > limits.maxStringBytes:
+      fail("BASIC string limits must retain bounded storage capacity")
+  if limits.maxStrings > high(int32) or
+    limits.maxStringBytes > high(int32):
+      fail("BASIC string limits must fit int32")
   if limits.maxSourceBytes <= 0 or
       limits.maxCodeInstructions <= 0 or
       limits.maxArrays < 0 or
@@ -624,6 +647,9 @@ proc lex(source: string, limits: Limits): seq[Token] =
         while pos < source.len and source[pos].isNamePart:
           inc pos
           inc column
+        if pos < source.len and source[pos] == '$':
+          inc pos
+          inc column
         let name = normalized(source[start ..< pos])
         result.add sourceToken(
           IdentifierToken,
@@ -649,6 +675,8 @@ proc isKeyword(token: Token, word: string): bool
 
 proc isReserved(name: string): bool =
   ## Returns whether a name is reserved by the BASIC grammar.
+  if textFunction(name) != NoTextFunction:
+    return true
   case name
   of "and", "call", "case", "dim", "do", "else", "elseif", "end", "eqv",
       "exit", "false", "for", "gosub", "goto", "if", "imp", "is", "let",
@@ -706,8 +734,8 @@ proc requireHostName(host: Host, name: string): string =
   result = normalized(name)
   if result.len == 0 or not result[0].isNameStart:
     fail("invalid BASIC host name '" & name & "'")
-  for c in result:
-    if not c.isNamePart:
+  for i, c in result:
+    if not c.isNamePart and not (c == '$' and i == result.high):
       fail("invalid BASIC host name '" & name & "'")
   if isReserved(result):
     fail("reserved keyword cannot name BASIC host data or a function")
@@ -715,13 +743,37 @@ proc requireHostName(host: Host, name: string): string =
       host.functionIds.getOrDefault(result, -1'i32) >= 0:
     fail("duplicate BASIC host name '" & name & "'")
 
+proc stringName(name: string): bool {.inline.} =
+  ## Returns whether a BASIC name declares a string value.
+  name.endsWith("$")
+
+proc requireType(name: string, value: Value) =
+  ## Enforces the string suffix at a host boundary.
+  if name.stringName != (value.kind == StringValue):
+    fail("BASIC type mismatch for '" & name & "'")
+
 proc addData*(host: var Host, name: string, value = Value()): int32 =
-  ## Exposes one host-controlled read-only numeric value to BASIC.
+  ## Exposes one read-only numeric host value to BASIC.
   let key = host.requireHostName(name)
+  requireType(key, value)
+  if value.kind == StringValue:
+    fail("use text to configure BASIC host strings")
   result = int32(host.dataNames.len)
   host.dataIds[key] = result
   host.dataNames.add key
   host.dataValues.add value
+  host.dataStrings.add ""
+
+proc addData*(host: var Host, name: string, value: string): int32 =
+  ## Exposes a string copied into each runtime's bounded storage.
+  let key = host.requireHostName(name)
+  if not key.stringName:
+    fail("BASIC string host data requires a $ suffix")
+  result = int32(host.dataNames.len)
+  host.dataIds[key] = result
+  host.dataNames.add key
+  host.dataValues.add stringValue(0, 0)
+  host.dataStrings.add value
 
 proc addHostFunction(
     host: var Host,
@@ -736,6 +788,8 @@ proc addHostFunction(
     fail("BASIC host function parameter count is outside int32 range")
   if workUnits <= 0 or workUnits > high(int32):
     fail("BASIC host function work cost must be a positive int32")
+  if key.stringName and callback.integer != nil:
+    fail("BASIC string callbacks require NumericHostProc")
   if callback.integer == nil and callback.numeric == nil:
     fail("BASIC host function callback cannot be nil")
   result = int32(host.functions.len)
@@ -786,6 +840,8 @@ proc getDataValue*(host: Host, name: string): Value =
   let id = host.findData(name)
   if id < 0:
     fail("unknown BASIC host data '" & name & "'")
+  if host.dataNames[int(id)].stringName:
+    fail("use getStringData to read configured host strings")
   host.dataValues[int(id)]
 
 proc getData*(host: Host, name: string): int32 =
@@ -797,7 +853,24 @@ proc setData*(host: var Host, name: string, value: Value) =
   let id = host.findData(name)
   if id < 0:
     fail("unknown BASIC host data '" & name & "'")
+  requireType(name, value)
+  if value.kind == StringValue:
+    fail("use text to configure BASIC host strings")
   host.dataValues[int(id)] = value
+
+proc getStringData*(host: Host, name: string): string =
+  ## Reads a configured host string before runtime creation.
+  let id = host.findData(name)
+  if id < 0 or not name.stringName:
+    fail("unknown BASIC string host data '" & name & "'")
+  host.dataStrings[int(id)]
+
+proc setData*(host: var Host, name: string, value: string) =
+  ## Updates text copied into subsequently created runtimes.
+  let id = host.findData(name)
+  if id < 0 or not name.stringName:
+    fail("unknown BASIC string host data '" & name & "'")
+  host.dataStrings[int(id)] = value
 
 proc instruction(
     op: Op,
@@ -833,6 +906,9 @@ proc addRoutine(
     fail(token, "duplicate BASIC name '" & name & "'")
   if compiler.program.routines.len >= compiler.limits.maxRoutines:
     fail(token, "subroutine count exceeds the configured limit")
+  for parameter in parameters:
+    if parameter.stringName:
+      compiler.program.usesStrings = true
   let id = int32(compiler.program.routines.len)
   compiler.program.routineIds[name] = id
   compiler.program.routines.add Routine(
@@ -868,6 +944,8 @@ proc addArray(
   let total = int64(compiler.program.arrayCells) + length
   if total > int64(compiler.limits.maxArrayElements):
     fail(token, "array storage exceeds the configured element limit")
+  if name.stringName:
+    compiler.program.usesStrings = true
   let id = int32(compiler.program.arrays.len)
   compiler.program.arrayIds[name] = id
   compiler.program.arrays.add BasicArray(
@@ -1113,6 +1191,8 @@ proc globalId(
     fail(token, "name '" & name & "' is not a scalar variable")
   if compiler.program.globalNames.len >= compiler.limits.maxGlobals:
     fail(token, "global count exceeds the configured limit")
+  if name.stringName:
+    compiler.program.usesStrings = true
   result = int32(compiler.program.globalNames.len)
   compiler.program.globalIds[name] = result
   compiler.program.globalNames.add name
@@ -1154,6 +1234,12 @@ proc binaryResult(
     rightValue: Expr
 ): Expr =
   ## Folds or emits one binary expression operation.
+  if leftValue.text != rightValue.text or
+    (leftValue.text and op notin {
+      AddOp, EqualOp, NotEqualOp, LessOp, LessEqualOp,
+      GreaterOp, GreaterEqualOp
+    }):
+      fail(parser.current, "BASIC expression type mismatch")
   let op =
     if op == DivideOp and parser.compiler[].limits.disableFloats:
       IntegerDivideOp
@@ -1178,7 +1264,9 @@ proc binaryResult(
     parser.release(left)
   if right.temporary and right.reg != destination:
     parser.release(right)
-  Expr(reg: destination, temporary: true)
+  Expr(
+    reg: destination, temporary: true, text: leftValue.text and op == AddOp
+  )
 
 proc precedence(token: Token, op: var Op): int =
   ## Returns the precedence and opcode of a binary operator.
@@ -1214,6 +1302,8 @@ proc parseHostCall(
     keepResult: bool
 ): Expr
 
+proc parseTextCall(parser: var Parser, name: Token): Expr
+  ## Parses a built-in string operation with checked argument types.
 
 proc parsePrimary(parser: var Parser): Expr =
   ## Parses a literal, scalar, array access, or parenthesized expression.
@@ -1223,6 +1313,13 @@ proc parsePrimary(parser: var Parser): Expr =
     if token.value > int64(high(int32)):
       fail(token, "positive integer literal is outside the int32 range")
     result = constant(int32(token.value))
+  of StringToken:
+    parser.compiler[].program.usesStrings = true
+    let
+      id = parser.compiler[].literalId(token.text)
+      destination = parser.allocateTemp
+    discard parser.emit(LoadStringOp, destination, id)
+    result = Expr(reg: destination, temporary: true, text: true)
   of FloatToken:
     try:
       let value = parseFloat(token.text.replace('d', 'e').replace('D', 'E'))
@@ -1241,6 +1338,8 @@ proc parsePrimary(parser: var Parser): Expr =
       return constant(-1)
     if token.text == "false":
       return constant(0)
+    if textFunction(token.text) != NoTextFunction:
+      return parser.parseTextCall(token)
     let hostData =
       parser.compiler[].program.hostDataIds.getOrDefault(
         token.text,
@@ -1251,7 +1350,9 @@ proc parsePrimary(parser: var Parser): Expr =
         fail(token, "host data cannot be called as a function")
       let destination = parser.allocateTemp
       discard parser.emit(LoadHostDataOp, destination, hostData)
-      return Expr(reg: destination, temporary: true)
+      return Expr(
+        reg: destination, temporary: true, text: token.text.stringName
+      )
     let hostFunction =
       parser.compiler[].program.hostFunctionIds.getOrDefault(
         token.text,
@@ -1269,6 +1370,8 @@ proc parsePrimary(parser: var Parser): Expr =
         "expected '(' after array name"
       )
       var index = parser.parseExpression
+      if index.text:
+        fail(token, "BASIC array index must be numeric")
       discard parser.expectKind(RightParenToken, "expected ')' after index")
       parser.materialize(index)
       let destination =
@@ -1277,7 +1380,9 @@ proc parsePrimary(parser: var Parser): Expr =
         else:
           parser.allocateTemp
       discard parser.emit(ArrayGetOp, destination, arrayId, index.reg)
-      return Expr(reg: destination, temporary: true)
+      return Expr(
+        reg: destination, temporary: true, text: token.text.stringName
+      )
     if parser.current.kind == LeftParenToken and
         parser.compiler[].program.routineIds.getOrDefault(
           token.text,
@@ -1286,11 +1391,13 @@ proc parsePrimary(parser: var Parser): Expr =
       fail(token, "subroutines do not return expression values")
     let parameter = parser.parameterIds.getOrDefault(token.text, -1'i32)
     if parameter >= 0:
-      return Expr(reg: parameter)
+      return Expr(reg: parameter, text: token.text.stringName)
     let id = parser.compiler[].globalId(token.text, token)
     let destination = parser.allocateTemp
     discard parser.emit(LoadGlobalOp, destination, id)
-    result = Expr(reg: destination, temporary: true)
+    result = Expr(
+      reg: destination, temporary: true, text: token.text.stringName
+    )
   else:
     fail(token, "expected a numeric expression")
 
@@ -1300,6 +1407,8 @@ proc parseUnary(parser: var Parser): Expr =
     inc parser.pos
     parser.enterSyntax
     result = parser.parseUnary
+    if result.text:
+      fail(parser.current, "BASIC unary operand must be numeric")
     parser.leaveSyntax
     return
   if parser.current.kind == MinusToken:
@@ -1311,6 +1420,8 @@ proc parseUnary(parser: var Parser): Expr =
     parser.enterSyntax
     var value = parser.parseUnary
     parser.leaveSyntax
+    if value.text:
+      fail(parser.current, "BASIC unary operand must be numeric")
     if value.constant:
       return constant(-value.value)
     parser.materialize(value)
@@ -1326,6 +1437,8 @@ proc parseUnary(parser: var Parser): Expr =
     parser.enterSyntax
     var value = parser.parseExpression(NotPrecedence)
     parser.leaveSyntax
+    if value.text:
+      fail(parser.current, "BASIC unary operand must be numeric")
     if value.constant:
       return constant(not value.value)
     parser.materialize(value)
@@ -1339,7 +1452,7 @@ proc parseUnary(parser: var Parser): Expr =
   parser.parsePrimary
 
 proc parseExpression(parser: var Parser, minimum = 1): Expr =
-  ## Parses a precedence-ordered numeric expression.
+  ## Parses a precedence-ordered numeric or string expression.
   result = parser.parseUnary
   while true:
     var op = AddOp
@@ -1541,6 +1654,8 @@ proc emitFalseJump(
     condition: var Expr
 ): int =
   ## Emits a false branch, fusing a global-immediate comparison when possible.
+  if condition.text:
+    fail(parser.current, "BASIC condition must be numeric")
   parser.materialize(condition)
   if parser.code.len - start == 5:
     let
@@ -1636,6 +1751,8 @@ proc parseAssignment(parser: var Parser, name: Token) =
     discard parser.expectKind(RightParenToken, "expected ')' after index")
     discard parser.expectKind(EqualToken, "expected '=' in assignment")
     var value = parser.parseExpression
+    if index.text or value.text != name.text.stringName:
+      fail(name, "BASIC assignment type mismatch")
     parser.materialize(index)
     parser.materialize(value)
     if not parser.fuseArrayAssignment(
@@ -1654,6 +1771,8 @@ proc parseAssignment(parser: var Parser, name: Token) =
   discard parser.expectKind(EqualToken, "expected '=' in assignment")
   let expressionStart = parser.code.len
   var value = parser.parseExpression
+  if value.text != name.text.stringName:
+    fail(name, "BASIC assignment type mismatch")
   parser.materialize(value)
   let parameter = parser.parameterIds.getOrDefault(name.text, -1'i32)
   if parameter >= 0:
@@ -1669,11 +1788,12 @@ proc parseArguments(
     parser: var Parser,
     name: Token,
     expected: int,
-    callable: string
+    callable: string,
+    legacyLiterals = false
 ): seq[CallArgument] =
   ## Parses call arguments while preserving values across nested calls.
-  ## A quoted string argument compiles to its interned literal id, so hosts
-  ## can accept references to compile-time text without a runtime string type.
+  ## Integer callbacks retain literal IDs for standalone quoted arguments.
+  parser.enterSyntax
   discard parser.expectKind(
     LeftParenToken,
     "expected '(' after " & callable & " name"
@@ -1684,7 +1804,8 @@ proc parseArguments(
         fail(parser.current, "too many " & callable & " arguments")
       let start = parser.code.len
       var value =
-        if parser.current.kind == StringToken:
+        if legacyLiterals and parser.current.kind == StringToken and
+          parser.peek(1).kind in {CommaToken, RightParenToken}:
           constant(parser.compiler[].literalId(parser.advance.text))
         else:
           parser.parseExpression
@@ -1701,6 +1822,7 @@ proc parseArguments(
   discard parser.expectKind(RightParenToken, "expected ')' after arguments")
   if result.len != expected:
     fail(name, "incorrect " & callable & " argument count")
+  parser.leaveSyntax
 
 proc emitArguments(parser: var Parser, arguments: var seq[CallArgument]) =
   ## Moves parsed call arguments into the bounded call scratch space.
@@ -1728,12 +1850,85 @@ proc emitArguments(parser: var Parser, arguments: var seq[CallArgument]) =
       discard parser.emit(SetArgumentOp, int32(i), argument.value.reg)
     parser.release(argument.value)
 
+proc parseTextCall(parser: var Parser, name: Token): Expr =
+  ## Compiles common BASIC string functions with their native value types.
+  parser.enterSyntax
+  let function = textFunction(name.text)
+  parser.compiler[].program.usesStrings = true
+  discard parser.expectKind(
+    LeftParenToken,
+    "expected '(' after string function"
+  )
+  var arguments: seq[CallArgument]
+  while parser.current.kind != RightParenToken:
+    if arguments.len >= 3:
+      fail(name, "too many string function arguments")
+    let start = parser.code.len
+    var value = parser.parseExpression
+    if value.constant and value.value.kind == FloatValue:
+      parser.materialize(value)
+    arguments.add CallArgument(
+      value: value, start: start, stop: parser.code.len
+    )
+    if parser.current.kind != CommaToken:
+      break
+    inc parser.pos
+    if parser.current.kind == RightParenToken:
+      fail(name, "expected a string function argument after ','")
+  discard parser.expectKind(
+    RightParenToken,
+    "expected ')' after string function"
+  )
+  let count = arguments.len
+  var signature: seq[bool]
+  case function
+  of LeftFunction, RightFunction:
+    signature = @[true, false]
+  of MidFunction:
+    signature =
+      if count == 2:
+        @[true, false]
+      else:
+        @[true, false, false]
+  of FindFunction:
+    signature =
+      if count == 2:
+        @[true, true]
+      else:
+        @[false, true, true]
+  of RepeatFunction:
+    signature = @[false, count == 2 and arguments[1].value.text]
+  of CharacterFunction, SpaceFunction, FormatFunction:
+    signature = @[false]
+  else:
+    signature = @[true]
+  if count != signature.len:
+    fail(name, "incorrect string function argument count")
+  for i, text in signature:
+    if arguments[i].value.text != text:
+      fail(name, "BASIC string function argument type mismatch")
+  if count > parser.compiler[].limits.maxParameters:
+    fail(name, "BASIC string function exceeds the parameter limit")
+  parser.compiler[].program.maxParameters = max(
+    parser.compiler[].program.maxParameters, int32(count)
+  )
+  parser.emitArguments(arguments)
+  let destination = parser.allocateTemp
+  discard parser.emit(
+    TextCallOp,
+    destination,
+    int32(ord(function)),
+    int32(count)
+  )
+  parser.leaveSyntax
+  Expr(reg: destination, temporary: true, text: name.text.stringName)
+
 proc parseHostCall(
     parser: var Parser,
     name: Token,
     keepResult: bool
 ): Expr =
-  ## Compiles a trusted host function call that returns one numeric value.
+  ## Compiles a trusted host function call that returns one value.
   let functionId =
     parser.compiler[].program.hostFunctionIds.getOrDefault(
       name.text,
@@ -1746,7 +1941,8 @@ proc parseHostCall(
   var arguments = parser.parseArguments(
     name,
     int(function.parameters),
-    "host function"
+    "host function",
+    legacyLiterals = not function.numeric
   )
   parser.emitArguments(arguments)
   let destination =
@@ -1761,7 +1957,9 @@ proc parseHostCall(
     function.workUnits
   )
   if keepResult:
-    result = Expr(reg: destination, temporary: true)
+    result = Expr(
+      reg: destination, temporary: true, text: name.text.stringName
+    )
 
 proc parseCall(parser: var Parser, name: Token) =
   ## Compiles a subroutine or discarded-result host function call.
@@ -1771,6 +1969,11 @@ proc parseCall(parser: var Parser, name: Token) =
     let count =
       int(parser.compiler[].program.routines[int(routine)].parameterCount)
     var arguments = parser.parseArguments(name, count, "subroutine")
+    for i, argument in arguments:
+      if argument.value.text != parser.compiler[].program.routines[
+        int(routine)
+      ].parameters[i].stringName:
+        fail(name, "BASIC subroutine argument type mismatch")
     parser.emitArguments(arguments)
     discard parser.emit(CallOp, routine)
   elif parser.compiler[].program.hostFunctionIds.getOrDefault(
@@ -1841,7 +2044,7 @@ proc capture(parser: var Parser, value: Expr): Expr =
     parser.materialize(result)
     result.temporary = false
   else:
-    result = Expr(reg: parser.allocateTemp())
+    result = Expr(reg: parser.allocateTemp(), text: value.text)
     discard parser.emit(MoveOp, result.reg, value.reg)
   parser.release(value)
 
@@ -1856,6 +2059,8 @@ proc counterValue(parser: var Parser, token: Token): Expr =
 
 proc storeCounter(parser: var Parser, token: Token, value: var Expr) =
   ## Writes a FOR counter without changing its parameter or global scope.
+  if token.text.stringName or value.text:
+    fail(token, "BASIC FOR counter and bounds must be numeric")
   parser.materialize(value)
   let parameter = parser.parameterIds.getOrDefault(token.text, -1'i32)
   if parameter >= 0:
@@ -1877,7 +2082,11 @@ proc parsePrint(parser: var Parser) =
   var trailingSemicolon = false
   while not parser.statementEnd:
     trailingSemicolon = false
-    if parser.current.kind == StringToken:
+    if parser.current.kind == StringToken and
+      (parser.peek(1).kind in {
+        SemicolonToken, CommaToken, NewlineToken, EndToken
+      } or
+      parser.peek(1).isKeyword("else")):
       let token = parser.advance
       let id = parser.compiler[].literalId(token.text)
       discard parser.emit(PrintTextOp, id)
@@ -2564,6 +2773,17 @@ proc verify(program: Program) =
       of MeterOp:
         if item.a <= 0 or item.b <= 0:
           fail("compiler produced an invalid meter instruction")
+      of LoadStringOp:
+        requireRegister(item.a)
+        if not program.usesStrings or item.b < 0 or
+          int(item.b) >= program.literals.len:
+            fail("compiler produced an invalid string constant")
+      of TextCallOp:
+        requireRegister(item.a)
+        if not program.usesStrings or item.b <= ord(NoTextFunction) or
+          item.b > ord(high(TextFunction)) or item.c < 1 or
+          item.c > 3 or item.c > program.maxParameters:
+            fail("compiler produced an invalid string function call")
       of LoadFloatOp:
         requireRegister(item.a)
         if program.disableFloats or item.b < 0 or
@@ -2681,11 +2901,15 @@ proc configureHost(
   program.hostDataIds = initOrderedTable[string, int32]()
   program.hostFunctionIds = initOrderedTable[string, int32]()
   for i, name in host.dataNames:
+    if name.stringName:
+      program.usesStrings = true
     if limits.disableFloats and host.dataValues[i].kind == FloatValue:
       fail("BASIC floating-point host data is disabled")
     program.hostDataIds[name] = int32(i)
     program.hostDataNames.add name
   for i, function in host.functions:
+    if function.name.stringName:
+      program.usesStrings = true
     if function.parameters > int32(limits.maxParameters):
       fail("BASIC host function parameter count exceeds the configured limit")
     program.hostFunctionIds[function.name] = int32(i)
@@ -2746,7 +2970,7 @@ proc portableCells(value: int64, message: string): int =
   int(value)
 
 proc clear(values: var seq[Value]) =
-  ## Clears preallocated numeric storage without changing its capacity.
+  ## Clears preallocated value storage without changing its capacity.
   if values.len > 0:
     zeroMem(addr values[0], values.len * sizeof(Value))
 
@@ -2800,6 +3024,9 @@ proc initRuntimeState(
   var allocatedBytes =
     int64(limits.maxCallDepth) * LogicalFrameBytes + hostCallbackBytes +
     argumentCells * 4
+  if program.usesStrings:
+    allocatedBytes += storageBytes(limits.maxStrings, limits.maxStringBytes) +
+      int64(program.literals.len) * 4
   if allocatedBytes > limits.maxMemoryBytes:
     fail("BASIC runtime exceeds the configured memory limit")
   for cells in [
@@ -2840,9 +3067,27 @@ proc initRuntimeState(
     remainingWork: limits.maxWorkUnits,
     allocatedBytes: allocatedBytes
   )
+  if program.usesStrings:
+    result.strings = initTextStorage(
+      limits.maxStrings, limits.maxStringBytes, limits.maxStringLength
+    )
+    result.stringLiterals = newSeq[int32](program.literals.len)
+    for handle in result.stringLiterals.mitems:
+      handle = -1
+    for i, name in program.globalNames:
+      if name.stringName:
+        result.globals[i] = result.strings.empty
+    for array in program.arrays:
+      if array.name.stringName:
+        for i in int(array.base) ..< int(array.base + array.length):
+          result.memory[i] = result.strings.empty
   for i, name in program.hostDataNames:
     let id = host.dataIds.getOrDefault(name, -1'i32)
-    result.hostData[i] = host.dataValues[int(id)]
+    result.hostData[i] =
+      if name.stringName:
+        result.strings.put(host.dataStrings[int(id)])
+      else:
+        host.dataValues[int(id)]
   for i, function in program.hostFunctions:
     let id = host.functionIds.getOrDefault(function.name, -1'i32)
     result.hostCallbacks[i] = host.functions[int(id)].callback
@@ -2866,6 +3111,17 @@ proc reset*(runtime: var Runtime) =
   runtime.memory.clear
   runtime.registers.clear
   runtime.arguments.clear
+  if runtime.program.usesStrings:
+    runtime.strings.reset(runtime.hostData)
+    for handle in runtime.stringLiterals.mitems:
+      handle = -1
+    for i, name in runtime.program.globalNames:
+      if name.stringName:
+        runtime.globals[i] = runtime.strings.empty
+    for array in runtime.program.arrays:
+      if array.name.stringName:
+        for i in int(array.base) ..< int(array.base + array.length):
+          runtime.memory[i] = runtime.strings.empty
   runtime.pc = runtime.program.routines[0].entry
   runtime.base = 0
   runtime.routine = 0
@@ -2957,6 +3213,8 @@ proc getData*(runtime: Runtime, name: string): int32 =
 
 proc requireValue(runtime: Runtime, value: Value) =
   ## Enforces the compiled numeric policy at every host entry point.
+  if value.kind == StringValue:
+    discard runtime.strings.length(value)
   if runtime.program.disableFloats and value.kind == FloatValue:
     fail("BASIC floating-point values are disabled")
 
@@ -2965,6 +3223,7 @@ proc setData*(runtime: var Runtime, id: int32, value: Value) =
   if id < 0 or id >= int32(runtime.hostData.len):
     fail("unknown BASIC host data id")
   runtime.requireValue(value)
+  requireType(runtime.program.hostDataNames[int(id)], value)
   runtime.hostData[int(id)] = value
 
 proc setData*(runtime: var Runtime, name: string, value: Value) =
@@ -2973,6 +3232,7 @@ proc setData*(runtime: var Runtime, name: string, value: Value) =
   if id < 0:
     fail("unknown BASIC host data '" & name & "'")
   runtime.requireValue(value)
+  requireType(runtime.program.hostDataNames[int(id)], value)
   runtime.hostData[int(id)] = value
 
 proc getGlobalValue*(runtime: Runtime, name: string): Value =
@@ -2992,6 +3252,7 @@ proc setGlobal*(runtime: var Runtime, name: string, value: Value) =
   if id < 0:
     fail("unknown BASIC global '" & name & "'")
   runtime.requireValue(value)
+  requireType(name, value)
   runtime.globals[int(id)] = value
 
 proc arrayLength*(runtime: Runtime, name: string): int32 =
@@ -3041,7 +3302,179 @@ proc setArray*(
   if id < 0:
     fail("unknown BASIC array '" & name & "'")
   runtime.requireValue(value)
+  requireType(name, value)
   runtime.memory[runtime.checkedArrayIndex(id, index)] = value
+
+proc getString*(runtime: Runtime, value: Value): string =
+  ## Reads owned text without exposing raw arena handles.
+  runtime.strings.get(value)
+
+proc putString*(runtime: var Runtime, value: string): Value =
+  ## Copies host text into bounded storage for a string-valued callback.
+  runtime.strings.put(value)
+
+proc getStringGlobal*(runtime: Runtime, name: string): string =
+  ## Reads one named string global as Nim text.
+  runtime.getString(runtime.getGlobalValue(name))
+
+proc getStringData*(runtime: Runtime, name: string): string =
+  ## Reads one bound host string as Nim text.
+  runtime.getString(runtime.getDataValue(name))
+
+proc getStringArray*(runtime: Runtime, name: string, index: int32): string =
+  ## Reads one string array element as Nim text.
+  runtime.getString(runtime.getArrayValue(name, index))
+
+proc setGlobal*(runtime: var Runtime, name: string, value: string) =
+  ## Copies text into a declared string global.
+  if not name.stringName or runtime.program.findGlobal(name) < 0:
+    fail("unknown BASIC string global '" & name & "'")
+  runtime.setGlobal(name, runtime.putString(value))
+
+proc setData*(runtime: var Runtime, id: int32, value: string) =
+  ## Copies text into one bound string data slot.
+  if id < 0 or int(id) >= runtime.hostData.len or
+    not runtime.program.hostDataNames[int(id)].stringName:
+      fail("unknown BASIC string host data id")
+  runtime.setData(id, runtime.putString(value))
+
+proc setData*(runtime: var Runtime, name: string, value: string) =
+  ## Copies text into one named string data binding.
+  runtime.setData(runtime.program.findHostData(name), value)
+
+proc setArray*(
+    runtime: var Runtime,
+    name: string,
+    index: int32,
+    value: string
+) =
+  ## Copies text into one string array element after validating its index.
+  let id = runtime.program.findArray(name)
+  if id < 0 or not name.stringName:
+    fail("unknown BASIC string array '" & name & "'")
+  discard runtime.checkedArrayIndex(id, index)
+  runtime.setArray(name, index, runtime.putString(value))
+
+proc stringCount*(runtime: Runtime): int =
+  ## Returns occupied native string slots, including the empty string.
+  runtime.strings.count
+
+proc stringBytes*(runtime: Runtime): int =
+  ## Returns native string bytes occupied since the last reset.
+  runtime.strings.bytesUsed
+
+proc chargeWork(runtime: var Runtime, cost: int64) =
+  ## Charges size-dependent string work before performing the operation.
+  if cost < 0 or cost > runtime.remainingWork:
+    fail("BASIC work limit exceeded")
+  runtime.remainingWork -= cost
+
+proc addValue(runtime: var Runtime, left, right: Value): Value =
+  ## Adds numbers or concatenates strings with byte-based work charging.
+  if left.kind == StringValue or right.kind == StringValue:
+    runtime.chargeWork(
+      int64(runtime.strings.length(left)) +
+      int64(runtime.strings.length(right))
+    )
+    runtime.strings.concat(left, right)
+  else:
+    left + right
+
+proc compareValue(runtime: var Runtime, op: Op, left, right: Value): Value =
+  ## Compares numbers or owned string contents with bounded work.
+  if left.kind == StringValue or right.kind == StringValue:
+    runtime.chargeWork(
+      int64(runtime.strings.length(left)) +
+      int64(runtime.strings.length(right))
+    )
+    let comparison = runtime.strings.compare(left, right)
+    evaluate(op, toValue(comparison), toValue(0))
+  else:
+    evaluate(op, left, right)
+
+proc textCall(runtime: var Runtime, function: TextFunction, count: int): Value =
+  ## Executes a built-in string function after charging its worst-case work.
+  template argument(i: int): Value =
+    ## Reads one evaluated argument from the bounded scratch space.
+    runtime.arguments[i]
+  var cost = 1'i64
+  for i in 0 ..< count:
+    if argument(i).kind == StringValue:
+      cost += int64(runtime.strings.length(argument(i)))
+  if function == FindFunction:
+    cost += int64(runtime.strings.length(argument(count - 2))) *
+      int64(runtime.strings.length(argument(count - 1)))
+  if function in {SpaceFunction, RepeatFunction}:
+    let length = argument(0).asInt
+    if length < 0 or length > runtime.limits.maxStringLength:
+      fail("BASIC string length limit exceeded")
+    cost += int64(length)
+  runtime.chargeWork(cost)
+  case function
+  of LengthFunction:
+    result = toValue(runtime.strings.length(argument(0)))
+  of LeftFunction, RightFunction, MidFunction:
+    let length = runtime.strings.length(argument(0))
+    var
+      start = 0
+      size = length
+    if function == MidFunction:
+      start = int(argument(1).asInt)
+      if start < 1:
+        fail("BASIC MID$ start must be positive")
+      dec start
+      if count == 3:
+        size = int(argument(2).asInt)
+    else:
+      size = int(argument(1).asInt)
+      if function == RightFunction:
+        start = max(0, length - max(0, size))
+    if size < 0:
+      fail("BASIC substring length must be non-negative")
+    result = runtime.strings.slice(argument(0), start, size)
+  of UpperFunction, LowerFunction:
+    result = runtime.strings.mapped(argument(0), function == UpperFunction)
+  of TrimFunction, LeftTrimFunction, RightTrimFunction:
+    result = runtime.strings.trimmed(
+      argument(0), function != RightTrimFunction, function != LeftTrimFunction
+    )
+  of CodeFunction:
+    result = toValue(ord(runtime.strings.character(argument(0))))
+  of CharacterFunction:
+    let code = argument(0).asInt
+    if code < 0 or code > 255:
+      fail("BASIC CHR$ code must be within 0 .. 255")
+    result = runtime.strings.repeated(1, char(code))
+  of SpaceFunction:
+    result = runtime.strings.repeated(int(argument(0).asInt), ' ')
+  of RepeatFunction:
+    let character =
+      if argument(1).kind == StringValue:
+        runtime.strings.character(argument(1))
+      else:
+        let code = argument(1).asInt
+        if code < 0 or code > 255:
+          fail("BASIC STRING$ code must be within 0 .. 255")
+        char(code)
+    result = runtime.strings.repeated(int(argument(0).asInt), character)
+  of FindFunction:
+    let start =
+      if count == 3:
+        int(argument(0).asInt)
+      else:
+        1
+    result = toValue(runtime.strings.find(
+      argument(count - 2), argument(count - 1), start
+    ))
+  of FormatFunction:
+    let value = argument(0)
+    var text = $value
+    if value >= 0:
+      text = " " & text
+    runtime.chargeWork(int64(text.len))
+    result = runtime.strings.put(text)
+  of NoTextFunction:
+    fail("invalid BASIC string function")
 
 proc printedIntegerBytes(value: int32): int64 =
   ## Counts decimal print bytes without formatting or allocation.
@@ -3109,6 +3542,18 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
     case item.op
     of MeterOp:
       fail("BASIC bytecode contains consecutive meter instructions")
+    of LoadStringOp:
+      var handle = runtime.stringLiterals[int(item.b)]
+      if handle < 0:
+        let text = runtime.program.literals[int(item.b)]
+        runtime.chargeWork(int64(text.len))
+        handle = runtime.strings.put(text).stringHandle
+        runtime.stringLiterals[int(item.b)] = handle
+      register(item.a) = stringValue(runtime.strings.empty.stringOwner, handle)
+      inc runtime.pc
+    of TextCallOp:
+      register(item.a) = runtime.textCall(TextFunction(item.b), int(item.c))
+      inc runtime.pc
     of LoadFloatOp:
       register(item.a) = toValue(runtime.program.floats[int(item.b)])
       inc runtime.pc
@@ -3135,19 +3580,25 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
       inc runtime.pc
     of AddGlobalImmediateOp:
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] + item.b
+        runtime.addValue(runtime.globals[int(item.a)], item.b)
       inc runtime.pc
     of AddGlobalOp:
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] + runtime.globals[int(item.b)]
+        runtime.addValue(
+          runtime.globals[int(item.a)],
+          runtime.globals[int(item.b)]
+        )
       inc runtime.pc
     of AddGlobalHostDataOp:
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] + runtime.hostData[int(item.b)]
+        runtime.addValue(
+          runtime.globals[int(item.a)],
+          runtime.hostData[int(item.b)]
+        )
       inc runtime.pc
     of AddGlobalRegisterOp:
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] + register(item.b)
+        runtime.addValue(runtime.globals[int(item.a)], register(item.b))
       inc runtime.pc
     of ModuloGlobalImmediateOp:
       runtime.globals[int(item.a)] = `mod`(
@@ -3161,10 +3612,10 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
         runtime.globals[int(item.c)]
       )
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] + runtime.memory[index]
+        runtime.addValue(runtime.globals[int(item.a)], runtime.memory[index])
       inc runtime.pc
     of AddOp:
-      register(item.a) = register(item.b) + register(item.c)
+      register(item.a) = runtime.addValue(register(item.b), register(item.c))
       inc runtime.pc
     of SubtractOp:
       register(item.a) = register(item.b) - register(item.c)
@@ -3184,23 +3635,12 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
     of NegateOp:
       register(item.a) = -register(item.b)
       inc runtime.pc
-    of EqualOp:
-      register(item.a) = toValue(register(item.b) == register(item.c))
-      inc runtime.pc
-    of NotEqualOp:
-      register(item.a) = toValue(register(item.b) != register(item.c))
-      inc runtime.pc
-    of LessOp:
-      register(item.a) = toValue(register(item.b) < register(item.c))
-      inc runtime.pc
-    of LessEqualOp:
-      register(item.a) = toValue(register(item.b) <= register(item.c))
-      inc runtime.pc
-    of GreaterOp:
-      register(item.a) = toValue(register(item.b) > register(item.c))
-      inc runtime.pc
-    of GreaterEqualOp:
-      register(item.a) = toValue(register(item.b) >= register(item.c))
+    of EqualOp, NotEqualOp, LessOp, LessEqualOp, GreaterOp, GreaterEqualOp:
+      register(item.a) = runtime.compareValue(
+        item.op,
+        register(item.b),
+        register(item.c)
+      )
       inc runtime.pc
     of AndOp:
       register(item.a) = register(item.b) and register(item.c)
@@ -3276,7 +3716,7 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
         runtime.globals[int(item.b)]
       )
       runtime.memory[index] =
-        runtime.memory[index] + runtime.globals[int(item.c)]
+        runtime.addValue(runtime.memory[index], runtime.globals[int(item.c)])
       inc runtime.pc
     of SetArgumentOp:
       runtime.arguments[int(item.a)] = register(item.b)
@@ -3310,6 +3750,7 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
             runtime.integerArguments.toOpenArray(0, count - 1)
           )
       runtime.requireValue(value)
+      requireType(runtime.program.hostFunctions[functionId].name, value)
       if item.a >= 0:
         register(item.a) = value
       inc runtime.pc
@@ -3393,7 +3834,13 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
       inc runtime.pc
     of PrintValueOp:
       let value = register(item.a)
-      if value.kind == FloatValue:
+      if value.kind == StringValue:
+        let length = int64(runtime.strings.length(value))
+        runtime.chargeWork(length)
+        runtime.chargePrint(length)
+        if print != nil:
+          print(PrintEvent(kind: TextPrint, text: runtime.strings.get(value)))
+      elif value.kind == FloatValue:
         let text = $value
         runtime.chargePrint(int64(text.len))
         if print != nil:
@@ -3421,10 +3868,10 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
 ##
 ## Bounded string values for untrusted scripts.
 ##
-## Scripts never hold string data directly. A string is an int32 handle into
-## a per-runtime pool of immutable byte spans, and every operation on one is
-## a metered host function, so handles stay int32 values and the
-## interpreter needs no string type. The pool preallocates its arena and caps
+## This legacy API represents strings as int32 handles in a separate pool.
+## Every operation is a metered host function. Native $ strings instead use
+## the runtime-owned storage described by Limits. The pool preallocates
+## its arena and caps
 ## the handle count, the total bytes, and the length of any single string, so
 ## a script that builds strings in a loop hits a deterministic BasicError
 ## instead of growing host memory. Costly operations are priced for their
@@ -3443,9 +3890,6 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
 ## clamps, and `strWord` past the last word is the empty string.
 
 const
-  DefaultMaxStrings* = 256
-  DefaultMaxStringBytes* = 64 * 1024
-  DefaultMaxStringLength* = 1024
   EmptyHandle* = 0'i32
   SearchCapFactor = 64
 

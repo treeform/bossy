@@ -357,3 +357,22 @@ wend
     discard maskRuntime.run
     doAssert maskRuntime.getGlobal("flags") == 0
     doAssert maskRuntime.getGlobal("enabled") == 0
+
+block:
+  const NativeStringSource = """
+for i = 1 to 10000
+  message$ = "attack " + ltrim$(str$(i))
+  total = total + len(message$)
+next
+"""
+  var stringLimits = benchLimits()
+  stringLimits.maxStrings = 40000
+  stringLimits.maxStringBytes = 1024 * 1024
+  let program = compile(NativeStringSource, stringLimits)
+  var runtime = initRuntime(program, stringLimits)
+  describe("native string build", program, runtime)
+  timeIt("execute native string build", BenchRuns):
+    runtime.reset
+    discard runtime.run
+    doAssert runtime.getStringGlobal("message$") == "attack 10000"
+    doAssert runtime.getGlobal("total") == 108894

@@ -1,7 +1,7 @@
 import
   std/strutils,
   basic,
-  test_controls, test_floats, test_booleans
+  test_controls, test_floats, test_booleans, test_strings
 
 proc errorContains(
     action: proc() {.closure.},
@@ -376,7 +376,7 @@ echo "Testing BASIC syntax and type restrictions"
 block:
   doAssert errorContains(
     proc() = discard compile("value = \"not a value\"\n"),
-    "numeric expression"
+    "assignment type mismatch"
   )
   doAssert errorContains(
     proc() = discard compile("if true then\nvalue = 1\n"),

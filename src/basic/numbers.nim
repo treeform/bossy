@@ -5,19 +5,38 @@ type
 
   ValueKind* = enum
     IntegerValue,
-    FloatValue
+    FloatValue,
+    StringValue
 
   Value* = object
-    ## A finite float64 or a wrapping int32, with an integer zero default.
+    ## A number or owned string reference, with an integer zero default.
     case kind: ValueKind
     of IntegerValue:
       integer: int32
     of FloatValue:
       decimal: float64
+    of StringValue:
+      reference: uint64
 
 proc kind*(value: Value): ValueKind {.inline, raises: [].} =
-  ## Returns the numeric representation of a value.
+  ## Returns the stored type of a value.
   value.kind
+
+proc stringValue*(owner: uint32, handle: int32): Value {.raises: [].} =
+  ## Constructs an opaque reference for the runtime string store.
+  Value(kind: StringValue, reference: (uint64(owner) shl 32) or uint32(handle))
+
+proc stringOwner*(value: Value): uint32 {.raises: [BasicError].} =
+  ## Reads the owner of a string reference after checking its type.
+  if value.kind != StringValue:
+    raise newException(BasicError, "BASIC value must be a string")
+  uint32(value.reference shr 32)
+
+proc stringHandle*(value: Value): int32 {.raises: [BasicError].} =
+  ## Reads a string slot after checking its type.
+  if value.kind != StringValue:
+    raise newException(BasicError, "BASIC value must be a string")
+  cast[int32](uint32(value.reference and 0xffffffff'u64))
 
 converter toValue*(value: int32): Value {.inline, raises: [].} =
   ## Wraps an integer without changing its representation.
@@ -39,21 +58,25 @@ converter toValue*(value: float64): Value {.inline, raises: [BasicError].} =
     raise newException(BasicError, "BASIC floating-point value must be finite")
   Value(kind: FloatValue, decimal: value)
 
-proc asFloat*(value: Value): float64 {.inline, raises: [].} =
+proc asFloat*(value: Value): float64 {.inline, raises: [BasicError].} =
   ## Reads a float or widens an integer exactly to float64.
   case value.kind
   of IntegerValue:
     float64(value.integer)
   of FloatValue:
     value.decimal
+  of StringValue:
+    raise newException(BasicError, "BASIC value must be numeric")
 
-proc asBool*(value: Value): bool {.inline, raises: [].} =
+proc asBool*(value: Value): bool {.inline, raises: [BasicError].} =
   ## Tests a BASIC condition, where every nonzero numeric value is true.
   case value.kind
   of IntegerValue:
     value.integer != 0
   of FloatValue:
     value.decimal != 0.0
+  of StringValue:
+    raise newException(BasicError, "BASIC value must be numeric")
 
 proc asInt*(value: Value): int32 {.inline, raises: [BasicError].} =
   ## Reads an integer, rejecting fractional or out-of-range floats.
@@ -66,14 +89,18 @@ proc asInt*(value: Value): int32 {.inline, raises: [BasicError].} =
       trunc(value.decimal) != value.decimal:
         raise newException(BasicError, "BASIC value must be an exact int32")
     int32(value.decimal)
+  of StringValue:
+    raise newException(BasicError, "BASIC value must be numeric")
 
-proc `$`*(value: Value): string {.raises: [].} =
+proc `$`*(value: Value): string {.raises: [BasicError].} =
   ## Formats a numeric value using its stored representation.
   case value.kind
   of IntegerValue:
     $value.integer
   of FloatValue:
     $value.decimal
+  of StringValue:
+    raise newException(BasicError, "BASIC value must be numeric")
 
 proc `+`*(left, right: Value): Value {.inline, raises: [BasicError].} =
   ## Adds integers with wrapping or promotes mixed operands to float64.
@@ -103,6 +130,8 @@ proc `-`*(value: Value): Value {.inline, raises: [BasicError].} =
     toValue(0'i32 -% value.integer)
   of FloatValue:
     toValue(-value.decimal)
+  of StringValue:
+    raise newException(BasicError, "BASIC value must be numeric")
 
 proc `/`*(left, right: Value): Value {.inline, raises: [BasicError].} =
   ## Divides as float64 and rejects zero divisors and non-finite results.
@@ -147,6 +176,8 @@ proc bitInteger(value: Value): int32 {.inline, raises: [BasicError].} =
     result = int32(lower)
     if fraction > 0.5 or (fraction == 0.5 and (result and 1) != 0):
       inc result
+  of StringValue:
+    raise newException(BasicError, "BASIC value must be numeric")
 
 proc `not`*(value: Value): Value {.inline, raises: [BasicError].} =
   ## Complements every bit of a rounded int32 operand.
@@ -172,21 +203,21 @@ proc imp*(left, right: Value): Value {.inline, raises: [BasicError].} =
   ## Computes bitwise implication between two rounded int32 operands.
   toValue((not left.bitInteger) or right.bitInteger)
 
-proc `==`*(left, right: Value): bool {.inline, raises: [].} =
+proc `==`*(left, right: Value): bool {.inline, raises: [BasicError].} =
   ## Compares numeric values, widening only when a float is present.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     left.integer == right.integer
   else:
     left.asFloat == right.asFloat
 
-proc `<`*(left, right: Value): bool {.inline, raises: [].} =
+proc `<`*(left, right: Value): bool {.inline, raises: [BasicError].} =
   ## Orders numeric values, widening only when a float is present.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     left.integer < right.integer
   else:
     left.asFloat < right.asFloat
 
-proc `<=`*(left, right: Value): bool {.inline, raises: [].} =
+proc `<=`*(left, right: Value): bool {.inline, raises: [BasicError].} =
   ## Compares numeric values inclusively without changing their types.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     left.integer <= right.integer

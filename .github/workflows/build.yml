@@ -38,3 +38,4 @@ jobs:
           nim r examples/hosts.nim
           nim r examples/strings.nim
           nim r examples/floats.nim
+          nim r examples/natural_strings.nim

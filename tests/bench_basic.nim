@@ -309,3 +309,29 @@ end
       runtime.reset
       discard runtime.run
       keep(runtime.getGlobal("total"))
+
+block:
+  const FloatSource = """
+i = 0
+total = 0.0
+while i < 1000000
+  total = total + 0.25
+  i = i + 1
+wend
+"""
+  var
+    integerLimits = benchLimits()
+    floatRuntime = initRuntime(compile(FloatSource, limits), limits)
+  integerLimits.disableFloats = true
+  var integerRuntime = initRuntime(
+    compile(ArithmeticSource, integerLimits),
+    integerLimits
+  )
+  timeIt("execute floats", BenchRuns):
+    floatRuntime.reset
+    discard floatRuntime.run
+    doAssert floatRuntime.getGlobalValue("total").asFloat == 250000.0
+  timeIt("execute integer-only arithmetic", BenchRuns):
+    integerRuntime.reset
+    discard integerRuntime.run
+    keep(integerRuntime.getGlobal("total"))

@@ -3,7 +3,7 @@ import basic
 proc print(event: PrintEvent) =
   ## Writes BASIC output events to the terminal.
   case event.kind
-  of TextPrint:
+  of TextPrint, FloatPrint:
     stdout.write event.text
   of ValuePrint:
     stdout.write event.value

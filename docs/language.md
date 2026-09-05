@@ -6,13 +6,80 @@ This is a small structured BASIC dialect for embedded scripts.
 
 Identifiers and keywords are case-insensitive. Identifiers start with a
 letter or underscore, followed by letters, digits, or underscores. Scalar
-variables are implicitly declared and begin at zero. All values are signed
-32-bit integers.
+variables are implicitly declared and begin as integer zero. A value holds
+an `int32` or a finite `float64`. Floats are enabled by default. Arrays and
+parameters can hold either kind.
 
-Addition, subtraction, multiplication, and negation wrap in two's complement.
-`/` performs integer division, and `mod` computes the remainder. Division by
-zero raises `BasicError`. Dividing the minimum int32 value by -1 returns the
-minimum int32 value, and the corresponding remainder is zero.
+Integer literals retain their int32 range. Decimal points or exponents make
+floating-point literals, such as `1.5`, `.25`, `2.`, `1e-3`, or `2.5D+2`.
+Both `E` and `D` select float64. A float literal is limited to 128 bytes and
+an exponent magnitude of 512. Non-finite literals are rejected. Very small
+values can underflow to zero.
+
+Integer addition, subtraction, multiplication, and negation wrap in two's
+complement. If either operand is a float, arithmetic promotes to float64.
+`/` performs floating-point division, including `3 / 2 = 1.5`. Use `\` for
+integer division toward zero. `mod` computes an integer remainder. Both
+integer operators require exact int32 operands, accepting `3.0` and rejecting
+`3.5`. Division by zero and non-finite results raise `BasicError`. Integer
+division of the minimum int32 by -1 returns the minimum int32, and the
+corresponding remainder is zero.
+
+Floating-point arithmetic follows the host's float64 implementation and is
+not a cross-platform determinism guarantee. Integer arithmetic keeps its
+existing wrapping semantics, so `2147483647 + 1` wraps while
+`2147483647 + 1.0` produces the float `2147483648.0`.
+
+### Disabling floating-point execution
+
+Set `limits.disableFloats = true` before compiling deterministic scripts:
+
+```nim
+var limits = defaultLimits()
+limits.disableFloats = true
+let program = compile("answer = 3 / 2", limits)
+var runtime = initRuntime(program, limits)
+discard runtime.run
+doAssert runtime.getGlobal("answer") == 1
+```
+
+In this mode, float literals are rejected and `/` uses the original integer
+division semantics. Globals, arrays, host data, and callback results cannot
+receive float values, including whole-valued floats such as `1.0`. Integer
+arithmetic, comparisons, and VM control flow execute without floating-point
+operations.
+
+The restriction is stored in the compiled program and persists through
+`initRuntime`, `restart`, and `reset`. Creating a runtime with default limits
+does not enable floats for an integer-only program. To run a float-enabled
+program under integer-only limits, recompile it with `disableFloats`. Runtime
+creation rejects that mismatch because constant folding already used the
+selected division semantics. Trusted callbacks still need deterministic
+implementations and inputs.
+
+### Numeric values in Nim
+
+Existing `getGlobal`, `getArray`, and `getData` return exact int32 values.
+They raise `BasicError` for fractional or out-of-range floats. Use
+`getGlobalValue`, `getArrayValue`, and `getDataValue` to read either numeric
+kind, then inspect `.kind`, `.asFloat`, or `.asInt`. `.asFloat` widens int32
+exactly. `.asInt` requires an exact integer in the int32 range.
+
+Setters and `addData` accept integers or floats through checked `toValue`
+converters. `NumericHostProc` accepts `openArray[Value]` and returns `Value`.
+Register it with `addFunction`, just like an existing `HostProc`. Integer
+callbacks remain available. All their arguments must convert exactly to
+int32 before the callback runs, which also protects string handles from
+silent truncation. A replacement host must match the compiled callback kind,
+argument count, and work cost.
+
+Numeric cells occupy 16 logical bytes in both modes. Host callback slots
+occupy 32 bytes, and each argument scratch slot also reserves 4 bytes for
+integer callback conversion. These preallocated buffers count toward
+`maxMemoryBytes`. Arithmetic does not grow runtime storage. Compiled float
+constants belong to the shared program, outside the runtime memory budget.
+The instruction, work, call-depth, and output limits apply in both modes.
+See [the numeric host example](../examples/floats.nim).
 
 Comparisons use `=`, `<>`, `<`, `<=`, `>`, and `>=`. Boolean operators are
 `and`, `or`, `xor`, and `not`. Zero is false and any nonzero value is true.
@@ -42,7 +109,8 @@ end if
 ```
 
 `dim name(n)` declares a global one-dimensional array with an inclusive
-constant upper bound. Indices run from 0 through n. Array bounds are checked
+integer upper bound. Indices run from 0 through n and require exact int32
+values. Fractional indices are rejected. Array bounds are checked
 explicitly, including in release builds. Arrays and scalars occupy the shared
 global namespace.
 
@@ -115,9 +183,10 @@ in that order. Nested `for` loops must use different counter names. Counters
 may be globals or `sub` parameters. `exit for` leaves the nearest enclosing
 `for`, even when another kind of loop is nested inside it.
 
-Counters use the VM's wrapping int32 arithmetic. A zero step or counter
-overflow can make a loop repeat until its instruction or work limit is hit.
-Use bounds and increments that stay within the int32 range for finite loops.
+Counters use the VM's numeric arithmetic and accept fractional steps. A zero
+step, integer wraparound, or a float step too small to change the counter can
+keep a loop running until an execution budget stops it. Choose bounds and
+increments that let the counter reach the end of the range.
 
 `do ... loop` can test a `while` or `until` condition at either the beginning
 or the end, or omit the condition. A condition at the end allows the body to
@@ -205,17 +274,21 @@ addScore(7)
 call addScore(3)
 ```
 
-Parameters are local integer values passed by value. Other scalar variables
+Parameters are local numeric values passed by value. Other scalar variables
 are global. Subroutines can call each other and recurse within the configured
 call depth. `exit sub` and `end sub` exit the entire procedure, including any
 pending `gosub` calls inside it. For compatibility with earlier versions of
 this library, a bare `return` also exits a `sub` when there is no pending
-`gosub` in that call. Native host functions can return integers and can appear
+`gosub` in that call. Native host functions can return numeric values and appear
 in expressions.
 
 ## Output and literals
 
-`print` emits text, integer, and newline events to the host's callback.
+`print` emits text, integer, float, and newline events to the host's callback.
+A `FloatPrint` event provides `floatValue` and its formatted `text`. Write
+`text` to preserve the exact byte count charged to the output budget. Integer
+output continues to use `ValuePrint` and `event.value`. Float formatting uses
+a bounded temporary string, including when the output callback is omitted.
 A comma inserts one space. A semicolon concatenates items, and a trailing
 semicolon suppresses the newline. Double a quote inside a quoted literal
 to include a quote character.
@@ -261,7 +334,7 @@ equal text can have different handles.
 
 ## Unsupported features
 
-There are no floating-point values, multidimensional arrays, native string
+There are no multidimensional arrays, native string
 variables, script-defined value-returning functions, `on error` handlers, or
 built-in file, network, or console input operations. The host chooses the
 native capabilities exposed to scripts.

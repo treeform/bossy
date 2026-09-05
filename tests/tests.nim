@@ -1,7 +1,7 @@
 import
   std/strutils,
   basic,
-  test_controls
+  test_controls, test_floats
 
 proc errorContains(
     action: proc() {.closure.},
@@ -138,7 +138,7 @@ print "done";
     output = ""
   let logger: PrintProc = proc(event: PrintEvent) =
     case event.kind
-    of TextPrint:
+    of TextPrint, FloatPrint:
       output.add event.text
     of ValuePrint:
       output.add $event.value
@@ -376,7 +376,7 @@ echo "Testing BASIC syntax and type restrictions"
 block:
   doAssert errorContains(
     proc() = discard compile("value = \"not a value\"\n"),
-    "integer expression"
+    "numeric expression"
   )
   doAssert errorContains(
     proc() = discard compile("if true then\nvalue = 1\n"),

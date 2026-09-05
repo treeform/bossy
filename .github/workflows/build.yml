@@ -37,3 +37,4 @@ jobs:
           nim r examples/hello.nim
           nim r examples/hosts.nim
           nim r examples/strings.nim
+          nim r examples/floats.nim

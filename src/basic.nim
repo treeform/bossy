@@ -1,10 +1,13 @@
-## A deterministic BASIC compiler and metered register-machine interpreter.
-## Scripts use int32 values, arrays, structured control flow, and local jumps.
+## A BASIC compiler and metered register-machine interpreter.
+## Scripts use int32 and optional float64 values, arrays, and local jumps.
 ## Runtimes preallocate numeric storage and bind trusted native callbacks.
 ## Optional handle-based strings have separately bounded pools.
 
 import
-  std/[strutils, tables]
+  std/[strutils, tables],
+  basic/numbers
+
+export numbers
 
 const
   DefaultMaxSourceBytes* = 1 * 1024 * 1024
@@ -25,14 +28,16 @@ const
   DefaultMaxWorkUnits* = 10_000_000'i64
   DefaultMaxPrintBytes* = 1'i64 * 1024 * 1024
   DefaultMaxPrintEvents* = 100_000'i64
+  MaximumFloatLiteralBytes* = 128
+  MaximumFloatExponent* = 512
   LogicalFrameBytes = 16'i64
-  LogicalHostCallbackBytes = 16'i64
+  LogicalHostCallbackBytes = 32'i64
+  LogicalValueBytes = 16'i64
   EmptyArguments: array[0, int32] = []
 
 type
-  BasicError* = object of CatchableError
-
   Limits* = object
+    disableFloats*: bool
     maxSourceBytes*: int
     maxCodeInstructions*: int
     maxArrays*: int
@@ -54,27 +59,35 @@ type
   PrintKind* = enum
     TextPrint,
     ValuePrint,
+    FloatPrint,
     NewlinePrint
 
   PrintEvent* = object
     kind*: PrintKind
     text*: string
     value*: int32
+    floatValue*: float64
 
   PrintProc* = proc(event: PrintEvent) {.closure.}
 
   HostProc* = proc(arguments: openArray[int32]): int32
     {.closure.}
 
+  NumericHostProc* = proc(arguments: openArray[Value]): Value {.closure.}
+
+  HostCallback = object
+    integer: HostProc
+    numeric: NumericHostProc
+
   HostFunction = object
     name: string
     parameters: int32
     workUnits: int32
-    callback: HostProc
+    callback: HostCallback
 
   Host* = object
     dataNames: seq[string]
-    dataValues: seq[int32]
+    dataValues: seq[Value]
     dataIds: OrderedTable[string, int32]
     functions: seq[HostFunction]
     functionIds: OrderedTable[string, int32]
@@ -88,6 +101,7 @@ type
   TokenKind = enum
     IdentifierToken,
     IntegerToken,
+    FloatToken,
     StringToken,
     LabelToken,
     NewlineToken,
@@ -99,6 +113,7 @@ type
     MinusToken,
     StarToken,
     SlashToken,
+    BackslashToken,
     EqualToken,
     NotEqualToken,
     LessToken,
@@ -117,6 +132,7 @@ type
   Op = enum
     MeterOp,
     LoadImmediateOp,
+    LoadFloatOp,
     MoveOp,
     LoadGlobalOp,
     LoadHostDataOp,
@@ -133,6 +149,7 @@ type
     SubtractOp,
     MultiplyOp,
     DivideOp,
+    IntegerDivideOp,
     ModuloOp,
     NegateOp,
     EqualOp,
@@ -195,12 +212,15 @@ type
     parameterCount: int32
 
   HostFunctionSpec = object
+    numeric: bool
     name: string
     parameters: int32
     workUnits: int32
 
   Program* = ref object
     ## A ref so sharing a program copies the handle, not the bytecode.
+    disableFloats: bool
+    floats: seq[float64]
     code: seq[Instruction]
     arrays: seq[BasicArray]
     routines: seq[Routine]
@@ -230,13 +250,14 @@ type
   Runtime* = ref object
     program: Program
     limits: Limits
-    globals: seq[int32]
-    memory: seq[int32]
-    registers: seq[int32]
-    arguments: seq[int32]
+    globals: seq[Value]
+    memory: seq[Value]
+    registers: seq[Value]
+    arguments: seq[Value]
     frames: seq[Frame]
-    hostData: seq[int32]
-    hostCallbacks: seq[HostProc]
+    hostData: seq[Value]
+    integerArguments: seq[int32]
+    hostCallbacks: seq[HostCallback]
     pc: int32
     base: int32
     routine: int32
@@ -250,7 +271,7 @@ type
 
   Expr = object
     constant: bool
-    value: int32
+    value: Value
     reg: int32
     temporary: bool
 
@@ -453,6 +474,10 @@ proc lex(source: string, limits: Limits): seq[Token] =
       result.add sourceToken(SlashToken, line, column)
       inc pos
       inc column
+    of '\\':
+      result.add sourceToken(BackslashToken, line, column)
+      inc pos
+      inc column
     of '=':
       result.add sourceToken(EqualToken, line, column)
       inc pos
@@ -520,27 +545,74 @@ proc lex(source: string, limits: Limits): seq[Token] =
         startColumn,
         value
       )
-    of '0' .. '9':
+    of '0' .. '9', '.':
       let
         start = pos
         startColumn = column
-      var value = 0'i64
+      var
+        digits = 0
+        floating = false
       while pos < source.len and source[pos] in {'0' .. '9'}:
-        value = value * 10 + int64(ord(source[pos]) - ord('0'))
-        if value > 2_147_483_648'i64:
-          fail(
-            sourceToken(IntegerToken, line, startColumn),
-            "integer literal is outside the int32 range"
-          )
         inc pos
-        inc column
-      result.add sourceToken(
-        IntegerToken,
-        line,
-        startColumn,
-        source[start ..< pos],
-        value
-      )
+        inc digits
+      if pos < source.len and source[pos] == '.':
+        floating = true
+        inc pos
+        while pos < source.len and source[pos] in {'0' .. '9'}:
+          inc pos
+          inc digits
+      if digits == 0:
+        fail(sourceToken(FloatToken, line, startColumn), "expected digits")
+      if pos < source.len and source[pos] in {'e', 'E', 'd', 'D'}:
+        floating = true
+        inc pos
+        if pos < source.len and source[pos] in {'+', '-'}:
+          inc pos
+        let exponentStart = pos
+        var exponent = 0
+        while pos < source.len and source[pos] in {'0' .. '9'}:
+          exponent = exponent * 10 + ord(source[pos]) - ord('0')
+          if exponent > MaximumFloatExponent:
+            fail(
+              sourceToken(FloatToken, line, startColumn),
+              "floating-point exponent exceeds the supported range"
+            )
+          inc pos
+        if pos == exponentStart:
+          fail(
+            sourceToken(FloatToken, line, startColumn),
+            "expected exponent digits"
+          )
+      column += pos - start
+      let text = source[start ..< pos]
+      if floating:
+        if text.len > MaximumFloatLiteralBytes:
+          fail(
+            sourceToken(FloatToken, line, startColumn),
+            "floating-point literal exceeds the byte limit"
+          )
+        if limits.disableFloats:
+          fail(
+            sourceToken(FloatToken, line, startColumn),
+            "BASIC floating-point values are disabled"
+          )
+        result.add sourceToken(FloatToken, line, startColumn, text)
+      else:
+        var value = 0'i64
+        for digit in text:
+          value = value * 10 + int64(ord(digit) - ord('0'))
+          if value > 2_147_483_648'i64:
+            fail(
+              sourceToken(IntegerToken, line, startColumn),
+              "integer literal is outside the int32 range"
+            )
+        result.add sourceToken(
+          IntegerToken,
+          line,
+          startColumn,
+          text,
+          value
+        )
     else:
       if c.isNameStart:
         let
@@ -640,28 +712,28 @@ proc requireHostName(host: Host, name: string): string =
       host.functionIds.getOrDefault(result, -1'i32) >= 0:
     fail("duplicate BASIC host name '" & name & "'")
 
-proc addData*(host: var Host, name: string, value = 0'i32): int32 =
-  ## Exposes one host-controlled read-only int32 value to BASIC.
+proc addData*(host: var Host, name: string, value = Value()): int32 =
+  ## Exposes one host-controlled read-only numeric value to BASIC.
   let key = host.requireHostName(name)
   result = int32(host.dataNames.len)
   host.dataIds[key] = result
   host.dataNames.add key
   host.dataValues.add value
 
-proc addFunction*(
+proc addHostFunction(
     host: var Host,
     name: string,
     parameters: int,
-    callback: HostProc,
+    callback: HostCallback,
     workUnits = 16
 ): int32 =
-  ## Exposes one trusted int32 host callback to BASIC scripts.
+  ## Registers a trusted callback and its bounded argument and work costs.
   let key = host.requireHostName(name)
   if parameters < 0 or parameters > high(int32):
     fail("BASIC host function parameter count is outside int32 range")
   if workUnits <= 0 or workUnits > high(int32):
     fail("BASIC host function work cost must be a positive int32")
-  if callback == nil:
+  if callback.integer == nil and callback.numeric == nil:
     fail("BASIC host function callback cannot be nil")
   result = int32(host.functions.len)
   host.functionIds[key] = result
@@ -672,18 +744,52 @@ proc addFunction*(
     callback: callback
   )
 
+proc addFunction*(
+    host: var Host,
+    name: string,
+    parameters: int,
+    callback: HostProc,
+    workUnits = 16
+): int32 =
+  ## Exposes an integer callback with exact int32 argument conversion.
+  host.addHostFunction(
+    name,
+    parameters,
+    HostCallback(integer: callback),
+    workUnits
+  )
+
+proc addFunction*(
+    host: var Host,
+    name: string,
+    parameters: int,
+    callback: NumericHostProc,
+    workUnits = 16
+): int32 =
+  ## Exposes a callback that accepts and returns mixed numeric values.
+  host.addHostFunction(
+    name,
+    parameters,
+    HostCallback(numeric: callback),
+    workUnits
+  )
+
 proc findData(host: Host, name: string): int32 =
   ## Finds host data by its case-insensitive BASIC name.
   host.dataIds.getOrDefault(normalized(name), -1'i32)
 
-proc getData*(host: Host, name: string): int32 =
+proc getDataValue*(host: Host, name: string): Value =
   ## Reads a configured host data value before runtime creation.
   let id = host.findData(name)
   if id < 0:
     fail("unknown BASIC host data '" & name & "'")
   host.dataValues[int(id)]
 
-proc setData*(host: var Host, name: string, value: int32) =
+proc getData*(host: Host, name: string): int32 =
+  ## Reads host data as an exact int32, rejecting fractional values.
+  host.getDataValue(name).asInt
+
+proc setData*(host: var Host, name: string, value: Value) =
   ## Updates a host data value used by subsequently created runtimes.
   let id = host.findData(name)
   if id < 0:
@@ -970,8 +1076,8 @@ proc leaveSyntax(parser: var Parser) {.inline.} =
   ## Leaves one recursive syntax construct.
   dec parser.syntaxDepth
 
-proc constant(value: int32): Expr {.inline.} =
-  ## Constructs a compile-time integer expression.
+proc constant(value: Value): Expr {.inline.} =
+  ## Constructs a compile-time numeric expression.
   Expr(constant: true, value: value)
 
 proc materialize(parser: var Parser, value: var Expr) =
@@ -980,7 +1086,12 @@ proc materialize(parser: var Parser, value: var Expr) =
     value.reg = parser.allocateTemp
     value.temporary = true
     value.constant = false
-    discard parser.emit(LoadImmediateOp, value.reg, value.value)
+    if value.value.kind == FloatValue:
+      let id = int32(parser.compiler[].program.floats.len)
+      parser.compiler[].program.floats.add value.value.asFloat
+      discard parser.emit(LoadFloatOp, value.reg, id)
+    else:
+      discard parser.emit(LoadImmediateOp, value.reg, value.value.asInt)
 
 proc globalId(
     compiler: var Compiler,
@@ -1011,36 +1122,15 @@ proc literalId(compiler: var Compiler, value: string): int32 =
     compiler.literalIds[value] = result
     compiler.program.literals.add value
 
-proc wrapNegate(value: int32): int32 {.inline.} =
-  ## Negates an int32 using defined two's-complement wrapping.
-  0'i32 -% value
-
-proc safeDivide(left, right: int32): int32
-    {.inline.} =
-  ## Divides two int32 values with deterministic overflow behavior.
-  if right == 0:
-    fail("division by zero")
-  if left == low(int32) and right == -1:
-    return low(int32)
-  left div right
-
-proc safeModulo(left, right: int32): int32
-    {.inline.} =
-  ## Calculates an int32 remainder with deterministic overflow behavior.
-  if right == 0:
-    fail("division by zero")
-  if left == low(int32) and right == -1:
-    return 0
-  left mod right
-
-proc evaluate(op: Op, left, right: int32): int32 =
+proc evaluate(op: Op, left, right: Value): Value =
   ## Evaluates one binary operation during constant folding.
   case op
-  of AddOp: left +% right
-  of SubtractOp: left -% right
-  of MultiplyOp: left *% right
-  of DivideOp: safeDivide(left, right)
-  of ModuloOp: safeModulo(left, right)
+  of AddOp: left + right
+  of SubtractOp: left - right
+  of MultiplyOp: left * right
+  of DivideOp: left / right
+  of IntegerDivideOp: left div right
+  of ModuloOp: left mod right
   of EqualOp: int32(left == right)
   of NotEqualOp: int32(left != right)
   of LessOp: int32(left < right)
@@ -1059,6 +1149,11 @@ proc binaryResult(
     rightValue: Expr
 ): Expr =
   ## Folds or emits one binary expression operation.
+  let op =
+    if op == DivideOp and parser.compiler[].limits.disableFloats:
+      IntegerDivideOp
+    else:
+      op
   var
     left = leftValue
     right = rightValue
@@ -1093,6 +1188,7 @@ proc precedence(token: Token, op: var Op): int =
   of MinusToken: op = SubtractOp; 4
   of StarToken: op = MultiplyOp; 5
   of SlashToken: op = DivideOp; 5
+  of BackslashToken: op = IntegerDivideOp; 5
   of IdentifierToken:
     case token.text
     of "or": op = OrOp; 1
@@ -1120,6 +1216,14 @@ proc parsePrimary(parser: var Parser): Expr =
     if token.value > int64(high(int32)):
       fail(token, "positive integer literal is outside the int32 range")
     result = constant(int32(token.value))
+  of FloatToken:
+    try:
+      let value = parseFloat(token.text.replace('d', 'e').replace('D', 'E'))
+      result = constant(toValue(value))
+    except ValueError:
+      fail(token, "invalid floating-point literal")
+    except BasicError as error:
+      fail(token, error.msg)
   of LeftParenToken:
     parser.enterSyntax
     result = parser.parseExpression
@@ -1181,7 +1285,7 @@ proc parsePrimary(parser: var Parser): Expr =
     discard parser.emit(LoadGlobalOp, destination, id)
     result = Expr(reg: destination, temporary: true)
   else:
-    fail(token, "expected an integer expression")
+    fail(token, "expected a numeric expression")
 
 proc parseUnary(parser: var Parser): Expr =
   ## Parses unary plus, minus, and logical not.
@@ -1201,7 +1305,7 @@ proc parseUnary(parser: var Parser): Expr =
     var value = parser.parseUnary
     parser.leaveSyntax
     if value.constant:
-      return constant(wrapNegate(value.value))
+      return constant(-value.value)
     parser.materialize(value)
     let destination =
       if value.temporary:
@@ -1228,7 +1332,7 @@ proc parseUnary(parser: var Parser): Expr =
   parser.parsePrimary
 
 proc parseExpression(parser: var Parser, minimum = 1): Expr =
-  ## Parses a precedence-ordered integer expression.
+  ## Parses a precedence-ordered numeric expression.
   result = parser.parseUnary
   while true:
     var op = AddOp
@@ -1572,11 +1676,13 @@ proc parseArguments(
       if result.len >= expected:
         fail(parser.current, "too many " & callable & " arguments")
       let start = parser.code.len
-      let value =
+      var value =
         if parser.current.kind == StringToken:
           constant(parser.compiler[].literalId(parser.advance.text))
         else:
           parser.parseExpression
+      if value.constant and value.value.kind == FloatValue:
+        parser.materialize(value)
       result.add CallArgument(
         value: value,
         start: start,
@@ -1600,7 +1706,7 @@ proc emitArguments(parser: var Parser, arguments: var seq[CallArgument]) =
       kinds[i] = SetArgumentOp
       if argument.value.constant:
         kinds[i] = SetArgumentImmediateOp
-        operands[i] = argument.value.value
+        operands[i] = argument.value.value.asInt
       elif argument.stop - argument.start == 1:
         let item = parser.code[argument.start]
         if item.op == LoadGlobalOp and item.a == argument.value.reg:
@@ -1620,7 +1726,7 @@ proc parseHostCall(
     name: Token,
     keepResult: bool
 ): Expr =
-  ## Compiles a trusted host function call that returns one int32 value.
+  ## Compiles a trusted host function call that returns one numeric value.
   let functionId =
     parser.compiler[].program.hostFunctionIds.getOrDefault(
       name.text,
@@ -1723,10 +1829,12 @@ proc labelJump(parser: var Parser, op: Op) =
 
 proc capture(parser: var Parser, value: Expr): Expr =
   ## Pins a control value in its own register for the entire routine.
-  result = Expr(reg: parser.allocateTemp())
   if value.constant:
-    discard parser.emit(LoadImmediateOp, result.reg, value.value)
+    result = value
+    parser.materialize(result)
+    result.temporary = false
   else:
+    result = Expr(reg: parser.allocateTemp())
     discard parser.emit(MoveOp, result.reg, value.reg)
   parser.release(value)
 
@@ -2249,7 +2357,8 @@ proc workCost(item: Instruction): int32 {.inline.} =
   case item.op
   of HostCallOp:
     item.c
-  of DivideOp, ModuloOp, PrintTextOp, PrintValueOp, PrintNewlineOp:
+  of DivideOp, IntegerDivideOp, ModuloOp,
+      PrintTextOp, PrintValueOp, PrintNewlineOp:
     4
   of StoreGlobalImmediateOp, MoveGlobalOp, SetArgumentImmediateOp,
       SetArgumentGlobalOp:
@@ -2448,6 +2557,11 @@ proc verify(program: Program) =
       of MeterOp:
         if item.a <= 0 or item.b <= 0:
           fail("compiler produced an invalid meter instruction")
+      of LoadFloatOp:
+        requireRegister(item.a)
+        if program.disableFloats or item.b < 0 or
+          int(item.b) >= program.floats.len:
+            fail("compiler produced an invalid floating-point constant")
       of LoadImmediateOp:
         requireRegister(item.a)
       of MoveOp, NegateOp, NotOp:
@@ -2480,9 +2594,11 @@ proc verify(program: Program) =
         requireGlobal(item.a)
         requireArray(item.b)
         requireGlobal(item.c)
-      of AddOp, SubtractOp, MultiplyOp, DivideOp, ModuloOp, EqualOp,
-          NotEqualOp, LessOp, LessEqualOp, GreaterOp, GreaterEqualOp,
-          AndOp, OrOp, XorOp:
+      of AddOp, SubtractOp, MultiplyOp, DivideOp, IntegerDivideOp,
+          ModuloOp, EqualOp, NotEqualOp, LessOp, LessEqualOp,
+          GreaterOp, GreaterEqualOp, AndOp, OrOp, XorOp:
+        if program.disableFloats and item.op == DivideOp:
+          fail("compiler emitted floating-point division while disabled")
         requireRegister(item.a)
         requireRegister(item.b)
         requireRegister(item.c)
@@ -2558,6 +2674,8 @@ proc configureHost(
   program.hostDataIds = initOrderedTable[string, int32]()
   program.hostFunctionIds = initOrderedTable[string, int32]()
   for i, name in host.dataNames:
+    if limits.disableFloats and host.dataValues[i].kind == FloatValue:
+      fail("BASIC floating-point host data is disabled")
     program.hostDataIds[name] = int32(i)
     program.hostDataNames.add name
   for i, function in host.functions:
@@ -2565,6 +2683,7 @@ proc configureHost(
       fail("BASIC host function parameter count exceeds the configured limit")
     program.hostFunctionIds[function.name] = int32(i)
     program.hostFunctions.add HostFunctionSpec(
+      numeric: function.callback.numeric != nil,
       name: function.name,
       parameters: function.parameters,
       workUnits: function.workUnits
@@ -2584,7 +2703,7 @@ proc compileProgram(
   var compiler = Compiler(
     limits: limits,
     tokens: prepareTokens(lex(source, limits)),
-    program: Program(),
+    program: Program(disableFloats: limits.disableFloats),
     literalIds: initOrderedTable[string, int32](),
     subEnds: initOrderedTable[int, int]()
   )
@@ -2619,10 +2738,10 @@ proc portableCells(value: int64, message: string): int =
     fail(message)
   int(value)
 
-proc clear(values: var seq[int32]) =
-  ## Clears preallocated int32 storage without changing its capacity.
+proc clear(values: var seq[Value]) =
+  ## Clears preallocated numeric storage without changing its capacity.
   if values.len > 0:
-    zeroMem(addr values[0], values.len * sizeof(int32))
+    zeroMem(addr values[0], values.len * sizeof(Value))
 
 proc initRuntimeState(
     program: Program,
@@ -2631,6 +2750,8 @@ proc initRuntimeState(
 ): Runtime =
   ## Allocates bounded runtime state and binds its trusted host callbacks.
   limits.validate
+  if limits.disableFloats and not program.disableFloats:
+    fail("compile BASIC with disableFloats before integer-only execution")
   if program.code.len == 0:
     fail("cannot execute an empty or uncompiled BASIC program")
   if program.code.len > limits.maxCodeInstructions or
@@ -2644,7 +2765,11 @@ proc initRuntimeState(
       program.maxRegisters > int32(limits.maxRegisters):
     fail("compiled BASIC program exceeds the configured structural limits")
   for name in program.hostDataNames:
-    if host.dataIds.getOrDefault(name, -1'i32) < 0:
+    let id = host.dataIds.getOrDefault(name, -1'i32)
+    if id >= 0 and program.disableFloats and
+      host.dataValues[int(id)].kind == FloatValue:
+        fail("BASIC floating-point host data is disabled")
+    if id < 0:
       fail("missing BASIC host data binding '" & name & "'")
   for function in program.hostFunctions:
     let id = host.functionIds.getOrDefault(function.name, -1'i32)
@@ -2653,7 +2778,8 @@ proc initRuntimeState(
     let binding = host.functions[int(id)]
     if binding.parameters != function.parameters or
         binding.workUnits != function.workUnits or
-        binding.callback == nil:
+        (binding.callback.numeric != nil) != function.numeric or
+        (binding.callback.integer == nil and binding.callback.numeric == nil):
       fail("incompatible BASIC host function binding '" & function.name & "'")
   let
     registerCells =
@@ -2665,7 +2791,8 @@ proc initRuntimeState(
     hostCallbackBytes =
       int64(program.hostFunctions.len) * LogicalHostCallbackBytes
   var allocatedBytes =
-    int64(limits.maxCallDepth) * LogicalFrameBytes + hostCallbackBytes
+    int64(limits.maxCallDepth) * LogicalFrameBytes + hostCallbackBytes +
+    argumentCells * 4
   if allocatedBytes > limits.maxMemoryBytes:
     fail("BASIC runtime exceeds the configured memory limit")
   for cells in [
@@ -2675,31 +2802,32 @@ proc initRuntimeState(
     argumentCells,
     hostDataCells
   ]:
-    if cells > (limits.maxMemoryBytes - allocatedBytes) div 4:
+    if cells > (limits.maxMemoryBytes - allocatedBytes) div LogicalValueBytes:
       fail("BASIC runtime exceeds the configured memory limit")
-    allocatedBytes += cells * 4
+    allocatedBytes += cells * LogicalValueBytes
   result = Runtime(
     program: program,
     limits: limits,
-    globals: newSeq[int32](portableCells(
+    globals: newSeq[Value](portableCells(
       globalCells,
       "too many BASIC globals for this target"
     )),
-    memory: newSeq[int32](portableCells(
+    memory: newSeq[Value](portableCells(
       arrayCells,
       "too many BASIC array cells for this target"
     )),
-    registers: newSeq[int32](portableCells(
+    registers: newSeq[Value](portableCells(
       registerCells,
       "too many BASIC registers for this target"
     )),
-    arguments: newSeq[int32](portableCells(
+    arguments: newSeq[Value](portableCells(
       argumentCells,
       "too many BASIC arguments for this target"
     )),
     frames: newSeq[Frame](limits.maxCallDepth),
-    hostData: newSeq[int32](program.hostDataNames.len),
-    hostCallbacks: newSeq[HostProc](program.hostFunctions.len),
+    hostData: newSeq[Value](program.hostDataNames.len),
+    integerArguments: newSeq[int32](int(program.maxParameters)),
+    hostCallbacks: newSeq[HostCallback](program.hostFunctions.len),
     pc: program.routines[0].entry,
     remainingInstructions: limits.maxInstructions,
     remainingWork: limits.maxWorkUnits,
@@ -2809,38 +2937,54 @@ proc hostDataIndex*(program: Program, name: string): int32 =
   ## Returns a host data slot, or -1 when the name is unbound.
   program.findHostData(name)
 
-proc getData*(runtime: Runtime, name: string): int32 =
+proc getDataValue*(runtime: Runtime, name: string): Value =
   ## Reads one host data value currently visible to BASIC.
   let id = runtime.program.findHostData(name)
   if id < 0:
     fail("unknown BASIC host data '" & name & "'")
   runtime.hostData[int(id)]
 
-proc setData*(runtime: var Runtime, id: int32, value: int32) =
+proc getData*(runtime: Runtime, name: string): int32 =
+  ## Reads runtime host data as an exact int32.
+  runtime.getDataValue(name).asInt
+
+proc requireValue(runtime: Runtime, value: Value) =
+  ## Enforces the compiled numeric policy at every host entry point.
+  if runtime.program.disableFloats and value.kind == FloatValue:
+    fail("BASIC floating-point values are disabled")
+
+proc setData*(runtime: var Runtime, id: int32, value: Value) =
   ## Updates one host data slot by its compile-time binding index.
   if id < 0 or id >= int32(runtime.hostData.len):
     fail("unknown BASIC host data id")
+  runtime.requireValue(value)
   runtime.hostData[int(id)] = value
 
-proc setData*(runtime: var Runtime, name: string, value: int32) =
+proc setData*(runtime: var Runtime, name: string, value: Value) =
   ## Updates one host data value without resetting other VM state.
   let id = runtime.program.findHostData(name)
   if id < 0:
     fail("unknown BASIC host data '" & name & "'")
+  runtime.requireValue(value)
   runtime.hostData[int(id)] = value
 
-proc getGlobal*(runtime: Runtime, name: string): int32 =
+proc getGlobalValue*(runtime: Runtime, name: string): Value =
   ## Reads a scalar global after case-insensitive name resolution.
   let id = runtime.program.findGlobal(name)
   if id < 0:
     fail("unknown BASIC global '" & name & "'")
   runtime.globals[int(id)]
 
-proc setGlobal*(runtime: var Runtime, name: string, value: int32) =
+proc getGlobal*(runtime: Runtime, name: string): int32 =
+  ## Reads a scalar global as an exact int32.
+  runtime.getGlobalValue(name).asInt
+
+proc setGlobal*(runtime: var Runtime, name: string, value: Value) =
   ## Writes a scalar global after case-insensitive name resolution.
   let id = runtime.program.findGlobal(name)
   if id < 0:
     fail("unknown BASIC global '" & name & "'")
+  runtime.requireValue(value)
   runtime.globals[int(id)] = value
 
 proc arrayLength*(runtime: Runtime, name: string): int32 =
@@ -2853,10 +2997,11 @@ proc arrayLength*(runtime: Runtime, name: string): int32 =
 proc checkedArrayIndex(
     runtime: Runtime,
     arrayId: int32,
-    index: int32
+    value: Value
 ): int {.inline.} =
   ## Resolves an array index after one unsigned bounds comparison.
   let
+    index = value.asInt
     length = runtime.program.arrays[int(arrayId)].length
     base = runtime.program.arrays[int(arrayId)].base
   if cast[uint32](index) >= cast[uint32](length):
@@ -2867,23 +3012,28 @@ proc checkedArrayIndex(
     )
   int(base + index)
 
-proc getArray*(runtime: Runtime, name: string, index: int32): int32 =
+proc getArrayValue*(runtime: Runtime, name: string, index: int32): Value =
   ## Reads one global array element with an explicit bounds check.
   let id = runtime.program.findArray(name)
   if id < 0:
     fail("unknown BASIC array '" & name & "'")
   runtime.memory[runtime.checkedArrayIndex(id, index)]
 
+proc getArray*(runtime: Runtime, name: string, index: int32): int32 =
+  ## Reads one array element as an exact int32.
+  runtime.getArrayValue(name, index).asInt
+
 proc setArray*(
     runtime: var Runtime,
     name: string,
     index: int32,
-    value: int32
+    value: Value
 ) =
   ## Writes one global array element with an explicit bounds check.
   let id = runtime.program.findArray(name)
   if id < 0:
     fail("unknown BASIC array '" & name & "'")
+  runtime.requireValue(value)
   runtime.memory[runtime.checkedArrayIndex(id, index)] = value
 
 proc printedIntegerBytes(value: int32): int64 =
@@ -2952,6 +3102,9 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
     case item.op
     of MeterOp:
       fail("BASIC bytecode contains consecutive meter instructions")
+    of LoadFloatOp:
+      register(item.a) = toValue(runtime.program.floats[int(item.b)])
+      inc runtime.pc
     of LoadImmediateOp:
       register(item.a) = item.b
       inc runtime.pc
@@ -2975,22 +3128,22 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
       inc runtime.pc
     of AddGlobalImmediateOp:
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] +% item.b
+        runtime.globals[int(item.a)] + item.b
       inc runtime.pc
     of AddGlobalOp:
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] +% runtime.globals[int(item.b)]
+        runtime.globals[int(item.a)] + runtime.globals[int(item.b)]
       inc runtime.pc
     of AddGlobalHostDataOp:
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] +% runtime.hostData[int(item.b)]
+        runtime.globals[int(item.a)] + runtime.hostData[int(item.b)]
       inc runtime.pc
     of AddGlobalRegisterOp:
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] +% register(item.b)
+        runtime.globals[int(item.a)] + register(item.b)
       inc runtime.pc
     of ModuloGlobalImmediateOp:
-      runtime.globals[int(item.a)] = safeModulo(
+      runtime.globals[int(item.a)] = `mod`(
         runtime.globals[int(item.b)],
         item.c
       )
@@ -3001,25 +3154,28 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
         runtime.globals[int(item.c)]
       )
       runtime.globals[int(item.a)] =
-        runtime.globals[int(item.a)] +% runtime.memory[index]
+        runtime.globals[int(item.a)] + runtime.memory[index]
       inc runtime.pc
     of AddOp:
-      register(item.a) = register(item.b) +% register(item.c)
+      register(item.a) = register(item.b) + register(item.c)
       inc runtime.pc
     of SubtractOp:
-      register(item.a) = register(item.b) -% register(item.c)
+      register(item.a) = register(item.b) - register(item.c)
       inc runtime.pc
     of MultiplyOp:
-      register(item.a) = register(item.b) *% register(item.c)
+      register(item.a) = register(item.b) * register(item.c)
       inc runtime.pc
     of DivideOp:
-      register(item.a) = safeDivide(register(item.b), register(item.c))
+      register(item.a) = register(item.b) / register(item.c)
+      inc runtime.pc
+    of IntegerDivideOp:
+      register(item.a) = register(item.b) div register(item.c)
       inc runtime.pc
     of ModuloOp:
-      register(item.a) = safeModulo(register(item.b), register(item.c))
+      register(item.a) = `mod`(register(item.b), register(item.c))
       inc runtime.pc
     of NegateOp:
-      register(item.a) = wrapNegate(register(item.b))
+      register(item.a) = -register(item.b)
       inc runtime.pc
     of EqualOp:
       register(item.a) = int32(register(item.b) == register(item.c))
@@ -3095,7 +3251,7 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
       else:
         inc runtime.pc
     of JumpUnlessGlobalModuloEqualZeroOp:
-      if safeModulo(runtime.globals[int(item.a)], item.b) != 0:
+      if `mod`(runtime.globals[int(item.a)], item.b) != 0:
         runtime.pc = item.c
       else:
         inc runtime.pc
@@ -3113,7 +3269,7 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
         runtime.globals[int(item.b)]
       )
       runtime.memory[index] =
-        runtime.memory[index] +% runtime.globals[int(item.c)]
+        runtime.memory[index] + runtime.globals[int(item.c)]
       inc runtime.pc
     of SetArgumentOp:
       runtime.arguments[int(item.a)] = register(item.b)
@@ -3131,11 +3287,22 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
           runtime.program.hostFunctions[functionId].parameters
         )
         callback = runtime.hostCallbacks[functionId]
-      let value =
+      var value: Value
+      if callback.numeric != nil:
         if count == 0:
-          callback(EmptyArguments)
+          value = callback.numeric([])
         else:
-          callback(runtime.arguments.toOpenArray(0, count - 1))
+          value = callback.numeric(runtime.arguments.toOpenArray(0, count - 1))
+      else:
+        for i in 0 ..< count:
+          runtime.integerArguments[i] = runtime.arguments[i].asInt
+        if count == 0:
+          value = callback.integer(EmptyArguments)
+        else:
+          value = callback.integer(
+            runtime.integerArguments.toOpenArray(0, count - 1)
+          )
+      runtime.requireValue(value)
       if item.a >= 0:
         register(item.a) = value
       inc runtime.pc
@@ -3178,12 +3345,12 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
           copyMem(
             addr runtime.registers[int(nextBase)],
             addr runtime.registers[int(runtime.base)],
-            int(calleeRegisters) * sizeof(int32)
+            int(calleeRegisters) * sizeof(Value)
           )
         else:
           zeroMem(
             addr runtime.registers[int(nextBase)],
-            int(calleeRegisters) * sizeof(int32)
+            int(calleeRegisters) * sizeof(Value)
           )
       if item.op == CallOp:
         for i in 0 ..< calleeParameters:
@@ -3219,9 +3386,17 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
       inc runtime.pc
     of PrintValueOp:
       let value = register(item.a)
-      runtime.chargePrint(printedIntegerBytes(value))
-      if print != nil:
-        print(PrintEvent(kind: ValuePrint, value: value))
+      if value.kind == FloatValue:
+        let text = $value
+        runtime.chargePrint(int64(text.len))
+        if print != nil:
+          print(PrintEvent(
+            kind: FloatPrint, floatValue: value.asFloat, text: text
+          ))
+      else:
+        runtime.chargePrint(printedIntegerBytes(value.asInt))
+        if print != nil:
+          print(PrintEvent(kind: ValuePrint, value: value.asInt))
       inc runtime.pc
     of PrintNewlineOp:
       runtime.chargePrint(1)
@@ -3241,7 +3416,7 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
 ##
 ## Scripts never hold string data directly. A string is an int32 handle into
 ## a per-runtime pool of immutable byte spans, and every operation on one is
-## a metered host function, so the register machine stays pure int32 and the
+## a metered host function, so handles stay int32 values and the
 ## interpreter needs no string type. The pool preallocates its arena and caps
 ## the handle count, the total bytes, and the length of any single string, so
 ## a script that builds strings in a loop hits a deterministic BasicError

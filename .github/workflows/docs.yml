@@ -1,0 +1,39 @@
+name: Docs
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  deploy-dir: .gh-pages
+  nim-src: src/basic.nim
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: treeform/setup-nim-action@v6
+      - name: Install dependencies
+        shell: bash
+        run: |
+          cd ..
+          nimby install -g "${{ github.event.repository.name }}/${{ github.event.repository.name }}.nimble"
+      - name: Build documentation
+        run: nim doc --index:on --project --git.url:https://github.com/${{ github.repository }} --git.commit:master --out:${{ env.deploy-dir }} ${{ env.nim-src }}
+      - name: Keep documentation available for private review
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-docs
+          path: ${{ env.deploy-dir }}
+          include-hidden-files: true
+      - name: Publish documentation for the public package
+        if: ${{ github.event.repository.private == false }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ${{ env.deploy-dir }}

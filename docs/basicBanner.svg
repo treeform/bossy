@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">basic</title>
+  <desc id="desc">A small BASIC compiler and virtual machine for Nim.</desc>
+  <rect width="1200" height="360" rx="20" fill="#101b25"/>
+  <path d="M0 300H1200M0 240H1200M0 180H1200M0 120H1200M0 60H1200M60 0V360M120 0V360M180 0V360M240 0V360M300 0V360M360 0V360M420 0V360M480 0V360M540 0V360M600 0V360M660 0V360M720 0V360M780 0V360M840 0V360M900 0V360M960 0V360M1020 0V360M1080 0V360M1140 0V360" stroke="#1c2b37" stroke-width="1"/>
+  <rect x="64" y="62" width="5" height="36" fill="#80e0ad"/>
+  <text x="86" y="88" fill="#80e0ad" font-family="monospace" font-size="21" letter-spacing="3">SMALL SCRIPTS. NATIVE HOSTS.</text>
+  <text x="60" y="218" fill="#f2f6f7" font-family="monospace" font-weight="700" font-size="122">basic</text>
+  <text x="68" y="282" fill="#a5bbc9" font-family="monospace" font-size="24">An embeddable BASIC virtual machine for Nim.</text>
+  <rect x="800" y="77" width="330" height="206" rx="12" fill="#101b25" stroke="#385062"/>
+  <circle cx="823" cy="99" r="4" fill="#80e0ad"/>
+  <text x="843" y="105" fill="#a5bbc9" font-family="monospace" font-size="15">READY</text>
+  <path d="M801 121H1129" stroke="#385062"/>
+  <g font-family="monospace" font-size="20">
+    <text x="823" y="160" fill="#80e0ad">score = 6 * 7</text>
+    <text x="823" y="195" fill="#f2f6f7">print score</text>
+    <text x="823" y="250" fill="#a5bbc9">42</text>
+  </g>
+</svg>

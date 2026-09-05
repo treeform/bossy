@@ -12,9 +12,10 @@ The initial interpreter is copied without changes from
 
 The source module's Git blob is
 `3ee856596ec2b7ad6b9afdd782a35ddffa0205d3`.
-The copied tests and benchmarks only change `import polyworld/basic` to
-`import basic`. Package metadata, workflows, examples, and documentation
-are new. The package keeps the source project's minimum Nim version of
+At the initial extraction commit, `d0b3f19`, the copied tests and benchmarks
+only changed `import polyworld/basic` to `import basic`. Package metadata,
+workflows, examples, and documentation were new. Subsequent commits extend
+the standalone language and tests. The package keeps the minimum Nim version of
 2.2.10.
 
 Polyworld retains its interpreter, tests, benchmarks, and imports. Adoption

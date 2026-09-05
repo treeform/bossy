@@ -1,10 +1,7 @@
-## A small, deterministic BASIC compiler and register-machine interpreter.
-## Scripts use int32 values, global one-dimensional arrays, structured if and
-## while blocks, subroutines, and bounded logging. Source is compiled once;
-## the runtime performs no memory allocation during normal execution.
-## Native callbacks are trusted host code, and their own memory is not charged
-## to the script's VM memory budget. A bounded string pool at the end of this
-## module gives scripts handle-based text through metered host functions.
+## A deterministic BASIC compiler and metered register-machine interpreter.
+## Scripts use int32 values, arrays, structured control flow, and local jumps.
+## Runtimes preallocate numeric storage and bind trusted native callbacks.
+## Optional handle-based strings have separately bounded pools.
 
 import
   std/[strutils, tables]
@@ -92,6 +89,7 @@ type
     IdentifierToken,
     IntegerToken,
     StringToken,
+    LabelToken,
     NewlineToken,
     LeftParenToken,
     RightParenToken,
@@ -164,7 +162,10 @@ type
     SetArgumentGlobalOp,
     HostCallOp,
     CallOp,
+    GosubOp,
     ReturnOp,
+    ReturnLabelOp,
+    ExitSubOp,
     HaltOp,
     PrintTextOp,
     PrintValueOp,
@@ -216,10 +217,15 @@ type
     maxRegisters: int32
     maxParameters: int32
 
+  FrameKind = enum
+    SubFrame,
+    GosubFrame
+
   Frame = object
     base: int32
     routine: int32
     returnPc: int32
+    kind: FrameKind
 
   Runtime* = ref object
     program: Program
@@ -260,6 +266,20 @@ type
     literalIds: OrderedTable[string, int32]
     subEnds: OrderedTable[int, int]
 
+  LabelJump = object
+    token: Token
+    name: string
+    instruction: int
+
+  LoopKind = enum
+    ForLoop,
+    DoLoop
+
+  Loop = object
+    kind: LoopKind
+    counter: string
+    exits: seq[int]
+
   Parser = object
     compiler: ptr Compiler
     routineId: int32
@@ -271,6 +291,10 @@ type
     nextTemp: int32
     maxTemps: int32
     syntaxDepth: int32
+    inlineLine: int32
+    labels: OrderedTable[string, int32]
+    jumps: seq[LabelJump]
+    loops: seq[Loop]
 
 proc defaultLimits*(): Limits =
   ## Returns conservative defaults suitable for untrusted scripts.
@@ -390,7 +414,7 @@ proc lex(source: string, limits: Limits): seq[Token] =
       inc line
       column = 1
     of ':':
-      result.add sourceToken(NewlineToken, line, column)
+      result.add sourceToken(NewlineToken, line, column, ":")
       inc pos
       inc column
     of '\'':
@@ -551,12 +575,51 @@ proc isKeyword(token: Token, word: string): bool
 proc isReserved(name: string): bool =
   ## Returns whether a name is reserved by the BASIC grammar.
   case name
-  of "and", "call", "dim", "else", "end", "exit", "false", "gosub",
-      "goto", "if", "let", "mod", "not", "or", "print", "rem",
-      "return", "stop", "sub", "then", "true", "wend", "while", "xor":
+  of "and", "call", "case", "dim", "do", "else", "elseif", "end",
+      "exit", "false", "for", "gosub", "goto", "if", "is", "let",
+      "loop", "mod", "next", "not", "on", "or", "print", "rem",
+      "return", "select", "step", "stop", "sub", "then", "to", "true",
+      "until", "wend", "while", "xor":
     true
   else:
     false
+
+proc prepareTokens(tokens: seq[Token]): seq[Token] =
+  ## Recognizes labels and expands comma-separated NEXT counter lists.
+  var i = 0
+  while i < tokens.len:
+    var token = tokens[i]
+    let
+      statementStart = i == 0 or tokens[i - 1].kind == NewlineToken or
+        (result.len > 0 and result[^1].kind == LabelToken)
+      physicalStart = i == 0 or tokens[i - 1].line < token.line
+    if physicalStart and token.kind == IntegerToken:
+      if token.value > high(int32):
+        fail(token, "line number is outside the int32 range")
+      token.kind = LabelToken
+      token.text = $token.value
+    elif statementStart and token.kind == IdentifierToken and
+      i + 1 < tokens.len and tokens[i + 1].kind == NewlineToken and
+      tokens[i + 1].text == ":" and not isReserved(token.text):
+        token.kind = LabelToken
+        inc i
+    result.add token
+    inc i
+    if token.isKeyword("next") and i < tokens.len and
+      tokens[i].kind == IdentifierToken:
+        result.add tokens[i]
+        inc i
+        while i < tokens.len and tokens[i].kind == CommaToken:
+          var separator = tokens[i]
+          separator.kind = NewlineToken
+          separator.text = ":"
+          result.add separator
+          result.add token
+          inc i
+          if i >= tokens.len or tokens[i].kind != IdentifierToken:
+            fail(separator, "expected a counter after ',' in NEXT")
+          result.add tokens[i]
+          inc i
 
 proc initHost*(): Host =
   ## Creates an empty host interface for data and native functions.
@@ -706,8 +769,8 @@ proc addArray(
   compiler.program.arrayCells = int32(total)
 
 proc skipNewlines(tokens: seq[Token], pos: var int) =
-  ## Advances over consecutive statement separators.
-  while tokens[pos].kind == NewlineToken:
+  ## Advances over separators and labels during declaration discovery.
+  while tokens[pos].kind in {NewlineToken, LabelToken}:
     inc pos
 
 proc collectDeclarations(compiler: var Compiler) =
@@ -859,6 +922,11 @@ proc lineEnd(parser: var Parser) =
     return
   if parser.current.kind == EndToken:
     return
+  if parser.inlineLine > 0:
+    if parser.current.line != parser.inlineLine or parser.atKeyword("else"):
+      return
+    if parser.current.kind == NewlineToken and parser.current.text != ":":
+      return
   if parser.current.kind != NewlineToken:
     fail(parser.current, "expected the end of the statement")
   inc parser.pos
@@ -1601,12 +1669,98 @@ proc parseCall(parser: var Parser, name: Token) =
     fail(name, "unknown callable '" & name.text & "'")
   parser.lineEnd
 
+proc statementEnd(parser: Parser): bool =
+  ## Detects a separator, source end, or an inline ELSE boundary.
+  parser.pos >= parser.endPos or
+    parser.current.kind in {NewlineToken, EndToken} or
+    (parser.inlineLine > 0 and
+    (parser.current.line != parser.inlineLine or parser.atKeyword("else")))
+
+proc skipLabels(parser: var Parser) =
+  ## Consumes separators and binds routine-local labels to instruction offsets.
+  while parser.pos < parser.endPos:
+    let token = parser.current
+    case token.kind
+    of NewlineToken:
+      if parser.inlineLine > 0 and
+        (token.line != parser.inlineLine or token.text != ":"):
+          return
+    of LabelToken:
+      if parser.inlineLine > 0:
+        fail(token, "labels cannot appear inside a single-line IF")
+      if parser.labels.hasKey(token.text):
+        fail(token, "duplicate label '" & token.text & "'")
+      parser.labels[token.text] = int32(parser.code.len)
+    else:
+      return
+    inc parser.pos
+
+proc requireBlock(parser: Parser) =
+  ## Rejects structured block headers inside a single-line IF arm.
+  if parser.inlineLine > 0:
+    fail(parser.current, "block statements cannot appear in a single-line IF")
+
+proc labelJump(parser: var Parser, op: Op) =
+  ## Emits a branch whose routine-local target is resolved after parsing.
+  let token = parser.advance
+  var name: string
+  case token.kind
+  of IdentifierToken:
+    if isReserved(token.text):
+      fail(token, "expected a label name or line number")
+    name = token.text
+  of IntegerToken:
+    if token.value > high(int32):
+      fail(token, "line number is outside the int32 range")
+    name = $token.value
+  else:
+    fail(token, "expected a label name or line number")
+  parser.jumps.add LabelJump(
+    token: token,
+    name: name,
+    instruction: parser.emit(op, -1)
+  )
+
+proc capture(parser: var Parser, value: Expr): Expr =
+  ## Pins a control value in its own register for the entire routine.
+  result = Expr(reg: parser.allocateTemp())
+  if value.constant:
+    discard parser.emit(LoadImmediateOp, result.reg, value.value)
+  else:
+    discard parser.emit(MoveOp, result.reg, value.reg)
+  parser.release(value)
+
+proc counterValue(parser: var Parser, token: Token): Expr =
+  ## Loads a FOR counter from a parameter or a scalar global.
+  let parameter = parser.parameterIds.getOrDefault(token.text, -1'i32)
+  if parameter >= 0:
+    return Expr(reg: parameter)
+  let global = parser.compiler[].globalId(token.text, token)
+  result = Expr(reg: parser.allocateTemp(), temporary: true)
+  discard parser.emit(LoadGlobalOp, result.reg, global)
+
+proc storeCounter(parser: var Parser, token: Token, value: var Expr) =
+  ## Writes a FOR counter without changing its parameter or global scope.
+  parser.materialize(value)
+  let parameter = parser.parameterIds.getOrDefault(token.text, -1'i32)
+  if parameter >= 0:
+    discard parser.emit(MoveOp, parameter, value.reg)
+  else:
+    let global = parser.compiler[].globalId(token.text, token)
+    discard parser.emit(StoreGlobalOp, global, value.reg)
+  parser.release(value)
+
+proc finishLoop(parser: var Parser) =
+  ## Resolves EXIT statements for the innermost completed loop.
+  for location in parser.loops[^1].exits:
+    parser.code[location].a = int32(parser.code.len)
+  parser.loops.setLen(parser.loops.len - 1)
+
 proc parsePrint(parser: var Parser) =
   ## Compiles bounded print events without runtime string construction.
   discard parser.advance
   var trailingSemicolon = false
-  while parser.pos < parser.endPos and
-      parser.current.kind notin {NewlineToken, EndToken}:
+  while not parser.statementEnd:
     trailingSemicolon = false
     if parser.current.kind == StringToken:
       let token = parser.advance
@@ -1631,83 +1785,386 @@ proc parsePrint(parser: var Parser) =
   parser.lineEnd
 
 proc parseStatement(parser: var Parser)
+  ## Compiles one complete BASIC statement.
+
+proc parseInline(parser: var Parser) =
+  ## Compiles one single-line IF arm, including shorthand label branches.
+  while true:
+    parser.skipLabels
+    if parser.statementEnd:
+      return
+    let token = parser.current
+    if token.kind == IntegerToken or
+      (token.kind == IdentifierToken and not isReserved(token.text) and
+      (parser.peek(1).kind in {NewlineToken, EndToken} or
+      parser.peek(1).isKeyword("else"))):
+        parser.labelJump(JumpOp)
+        parser.lineEnd
+    else:
+      parser.parseStatement
+
+proc skipRemark(parser: var Parser) =
+  ## Skips a trailing REM comment when identifying a block IF header.
+  if parser.atKeyword("rem"):
+    while parser.current.kind notin {NewlineToken, EndToken}:
+      inc parser.pos
 
 proc parseIf(parser: var Parser) =
-  ## Compiles a structured multiline if, else, and end-if block.
+  ## Compiles single-line IF arms or block IF and ELSEIF chains.
   parser.enterSyntax
-  discard parser.advance
-  let conditionStart = parser.code.len
-  var condition = parser.parseExpression
+  let token = parser.advance
+  var
+    conditionStart = parser.code.len
+    condition = parser.parseExpression
   parser.expectKeyword("then")
+  parser.skipRemark
+  let inline = not parser.statementEnd or
+    (parser.current.kind == NewlineToken and parser.current.text == ":")
+  if inline:
+    let
+      previousLine = parser.inlineLine
+      falseJump = parser.emitFalseJump(conditionStart, condition)
+    parser.release(condition)
+    parser.inlineLine = token.line
+    parser.parseInline
+    if parser.atKeyword("else") and parser.current.line == token.line:
+      inc parser.pos
+      let endJump = parser.emit(JumpOp, -1)
+      parser.patchFalseJump(falseJump, parser.code.len)
+      parser.parseInline
+      parser.code[endJump].a = int32(parser.code.len)
+    else:
+      parser.patchFalseJump(falseJump, parser.code.len)
+    parser.inlineLine = previousLine
+    parser.leaveSyntax
+    return
+  parser.requireBlock
   parser.lineEnd
-  let falseJump = parser.emitFalseJump(conditionStart, condition)
-  parser.release(condition)
-  while parser.pos < parser.endPos and
-      not parser.atKeyword("else") and
-      not parser.atPair("end", "if"):
-    parser.parseStatement
-  if parser.pos >= parser.endPos:
-    fail(parser.current, "if block is missing 'end if'")
-  if parser.atKeyword("else"):
-    inc parser.pos
-    parser.lineEnd
-    let endJump = parser.emit(JumpOp, -1)
-    parser.patchFalseJump(falseJump, parser.code.len)
+  var ends: seq[int]
+  while true:
+    let falseJump = parser.emitFalseJump(conditionStart, condition)
+    parser.release(condition)
+    parser.skipLabels
     while parser.pos < parser.endPos and
-        not parser.atPair("end", "if"):
-      parser.parseStatement
-    if parser.pos >= parser.endPos:
-      fail(parser.current, "if block is missing 'end if'")
-    parser.code[endJump].a = int32(parser.code.len)
-  else:
-    parser.patchFalseJump(falseJump, parser.code.len)
-  parser.expectKeyword("end")
-  parser.expectKeyword("if")
-  parser.lineEnd
+      not parser.atKeyword("elseif") and not parser.atKeyword("else") and
+      not parser.atPair("end", "if"):
+        parser.parseStatement
+        parser.skipLabels
+    if parser.atKeyword("elseif"):
+      ends.add parser.emit(JumpOp, -1)
+      parser.patchFalseJump(falseJump, parser.code.len)
+      inc parser.pos
+      conditionStart = parser.code.len
+      condition = parser.parseExpression
+      parser.expectKeyword("then")
+      parser.skipRemark
+      parser.lineEnd
+      continue
+    if parser.atKeyword("else"):
+      inc parser.pos
+      parser.skipRemark
+      parser.lineEnd
+      ends.add parser.emit(JumpOp, -1)
+      parser.patchFalseJump(falseJump, parser.code.len)
+      parser.skipLabels
+      while parser.pos < parser.endPos and not parser.atPair("end", "if"):
+        parser.parseStatement
+        parser.skipLabels
+    else:
+      parser.patchFalseJump(falseJump, parser.code.len)
+    if parser.pos >= parser.endPos or not parser.atPair("end", "if"):
+      fail(token, "if block is missing 'end if'")
+    parser.pos += 2
+    parser.lineEnd
+    break
+  for location in ends:
+    parser.code[location].a = int32(parser.code.len)
   parser.leaveSyntax
 
 proc parseWhile(parser: var Parser) =
   ## Compiles a QBasic-style while and wend loop.
+  parser.requireBlock
   parser.enterSyntax
-  discard parser.advance
-  let loopStart = int32(parser.code.len)
-  let conditionStart = parser.code.len
+  let token = parser.advance
+  let loopStart = parser.code.len
   var condition = parser.parseExpression
   parser.lineEnd
-  let endJump = parser.emitFalseJump(conditionStart, condition)
+  let endJump = parser.emitFalseJump(loopStart, condition)
   parser.release(condition)
+  parser.skipLabels
   while parser.pos < parser.endPos and not parser.atKeyword("wend"):
     parser.parseStatement
+    parser.skipLabels
   if parser.pos >= parser.endPos:
-    fail(parser.current, "while block is missing 'wend'")
+    fail(token, "while block is missing 'wend'")
   parser.expectKeyword("wend")
   parser.lineEnd
-  discard parser.emit(JumpOp, loopStart)
+  discard parser.emit(JumpOp, int32(loopStart))
   parser.patchFalseJump(endJump, parser.code.len)
   parser.leaveSyntax
 
-proc parseReturn(parser: var Parser) =
-  ## Compiles an explicit return from a subroutine.
+proc parseFor(parser: var Parser) =
+  ## Compiles FOR with captured bounds, signed STEP, and matching NEXT.
+  parser.requireBlock
+  parser.enterSyntax
+  let
+    token = parser.advance
+    counter = parser.expectKind(IdentifierToken, "expected a FOR counter")
+  for loop in parser.loops:
+    if loop.kind == ForLoop and loop.counter == counter.text:
+      fail(counter, "FOR counter is already active")
+  discard parser.expectKind(EqualToken, "expected '=' after FOR counter")
+  var start = parser.parseExpression
+  parser.storeCounter(counter, start)
+  parser.expectKeyword("to")
+  let bound = parser.capture(parser.parseExpression())
+  var step = constant(1)
+  if parser.atKeyword("step"):
+    inc parser.pos
+    step = parser.parseExpression
+  step = parser.capture(step)
+  parser.lineEnd
+  let loopStart = parser.code.len
+  var positive = parser.binaryResult(GreaterEqualOp, step, constant(0))
+  let negativeJump = parser.emitFalseJump(loopStart, positive)
+  parser.release(positive)
+  var condition = parser.binaryResult(
+    LessEqualOp,
+    parser.counterValue(counter),
+    bound
+  )
+  let positiveEnd = parser.emitFalseJump(parser.code.len, condition)
+  parser.release(condition)
+  let bodyJump = parser.emit(JumpOp, -1)
+  parser.patchFalseJump(negativeJump, parser.code.len)
+  condition = parser.binaryResult(
+    GreaterEqualOp,
+    parser.counterValue(counter),
+    bound
+  )
+  let negativeEnd = parser.emitFalseJump(parser.code.len, condition)
+  parser.release(condition)
+  parser.code[bodyJump].a = int32(parser.code.len)
+  parser.loops.add Loop(kind: ForLoop, counter: counter.text)
+  parser.skipLabels
+  while parser.pos < parser.endPos and not parser.atKeyword("next"):
+    parser.parseStatement
+    parser.skipLabels
+  if parser.pos >= parser.endPos:
+    fail(token, "FOR loop is missing NEXT")
+  inc parser.pos
+  if parser.current.kind == IdentifierToken and not parser.statementEnd:
+    let closing = parser.advance
+    if closing.text != counter.text:
+      fail(closing, "NEXT counter does not match FOR '" & counter.text & "'")
+  parser.lineEnd
+  var next = parser.binaryResult(AddOp, parser.counterValue(counter), step)
+  parser.storeCounter(counter, next)
+  discard parser.emit(JumpOp, int32(loopStart))
+  parser.patchFalseJump(positiveEnd, parser.code.len)
+  parser.patchFalseJump(negativeEnd, parser.code.len)
+  parser.finishLoop
+  parser.leaveSyntax
+
+proc loopCondition(parser: var Parser): int =
+  ## Emits a loop exit branch for a WHILE or UNTIL condition.
+  let until = parser.advance.isKeyword("until")
+  var condition = parser.parseExpression
+  if until:
+    condition = parser.binaryResult(EqualOp, condition, constant(0))
+  result = parser.emitFalseJump(parser.code.len, condition)
+  parser.release(condition)
+
+proc parseDo(parser: var Parser) =
+  ## Compiles DO loops with optional entry or exit conditions.
+  parser.requireBlock
+  parser.enterSyntax
+  let
+    token = parser.advance
+    loopStart = parser.code.len
+  var entryEnd = -1
+  if parser.atKeyword("while") or parser.atKeyword("until"):
+    entryEnd = parser.loopCondition
+  parser.lineEnd
+  parser.loops.add Loop(kind: DoLoop)
+  parser.skipLabels
+  while parser.pos < parser.endPos and not parser.atKeyword("loop"):
+    parser.parseStatement
+    parser.skipLabels
+  if parser.pos >= parser.endPos:
+    fail(token, "DO block is missing LOOP")
+  inc parser.pos
+  var exitEnd = -1
+  if parser.atKeyword("while") or parser.atKeyword("until"):
+    if entryEnd >= 0:
+      fail(parser.current, "DO cannot have both entry and exit conditions")
+    exitEnd = parser.loopCondition
+  parser.lineEnd
+  discard parser.emit(JumpOp, int32(loopStart))
+  for location in [entryEnd, exitEnd]:
+    if location >= 0:
+      parser.patchFalseJump(location, parser.code.len)
+  parser.finishLoop
+  parser.leaveSyntax
+
+proc caseMatch(parser: var Parser, selector: Expr): int =
+  ## Emits one CASE item and returns its branch into the matching body.
+  var
+    comparison = EqualOp
+    lowerMiss = -1
+  let relational = parser.atKeyword("is")
+  if relational:
+    inc parser.pos
+    if parser.current.kind notin {
+      EqualToken, NotEqualToken, LessToken, LessEqualToken,
+      GreaterToken, GreaterEqualToken
+    }:
+      fail(parser.current, "expected a comparison after CASE IS")
+    discard precedence(parser.advance, comparison)
+  var value = parser.parseExpression
+  if parser.atKeyword("to"):
+    if relational:
+      fail(parser.current, "CASE IS cannot be combined with TO")
+    inc parser.pos
+    var lower = parser.binaryResult(GreaterEqualOp, selector, value)
+    lowerMiss = parser.emitFalseJump(parser.code.len, lower)
+    parser.release(lower)
+    value = parser.parseExpression
+    comparison = LessEqualOp
+  var condition = parser.binaryResult(comparison, selector, value)
+  let miss = parser.emitFalseJump(parser.code.len, condition)
+  parser.release(condition)
+  result = parser.emit(JumpOp, -1)
+  parser.patchFalseJump(miss, parser.code.len)
+  if lowerMiss >= 0:
+    parser.patchFalseJump(lowerMiss, parser.code.len)
+
+proc parseSelect(parser: var Parser) =
+  ## Compiles SELECT CASE with value lists, ranges, and CASE IS tests.
+  parser.requireBlock
+  parser.enterSyntax
   let token = parser.advance
-  if parser.routineId == 0:
-    fail(token, "return can only be used inside a subroutine")
-  discard parser.emit(ReturnOp)
+  parser.expectKeyword("case")
+  let selector = parser.capture(parser.parseExpression())
+  parser.lineEnd
+  var
+    ends: seq[int]
+    previousMiss = -1
+    hadElse = false
+  parser.skipLabels
+  while parser.pos < parser.endPos and not parser.atPair("end", "select"):
+    if hadElse:
+      fail(parser.current, "CASE ELSE must be the last CASE")
+    parser.expectKeyword("case")
+    if previousMiss >= 0:
+      parser.code[previousMiss].a = int32(parser.code.len)
+      previousMiss = -1
+    if parser.atKeyword("else"):
+      inc parser.pos
+      hadElse = true
+    else:
+      var matches: seq[int]
+      while true:
+        matches.add parser.caseMatch(selector)
+        if parser.current.kind != CommaToken:
+          break
+        inc parser.pos
+      previousMiss = parser.emit(JumpOp, -1)
+      for location in matches:
+        parser.code[location].a = int32(parser.code.len)
+    parser.lineEnd
+    parser.skipLabels
+    while parser.pos < parser.endPos and not parser.atKeyword("case") and
+      not parser.atPair("end", "select"):
+        parser.parseStatement
+        parser.skipLabels
+    ends.add parser.emit(JumpOp, -1)
+  if parser.pos >= parser.endPos:
+    fail(token, "SELECT block is missing END SELECT")
+  parser.pos += 2
+  parser.lineEnd
+  if previousMiss >= 0:
+    parser.code[previousMiss].a = int32(parser.code.len)
+  for location in ends:
+    parser.code[location].a = int32(parser.code.len)
+  parser.leaveSyntax
+
+proc parseOn(parser: var Parser) =
+  ## Compiles one-based computed GOTO or GOSUB with bounded static targets.
+  discard parser.advance
+  var selector = parser.parseExpression
+  parser.materialize(selector)
+  let op =
+    if parser.atKeyword("goto"):
+      JumpOp
+    elif parser.atKeyword("gosub"):
+      GosubOp
+    else:
+      fail(parser.current, "expected GOTO or GOSUB after ON expression")
+  inc parser.pos
+  var
+    index = 1'i32
+    ends: seq[int]
+  while true:
+    var condition = parser.binaryResult(
+      EqualOp,
+      Expr(reg: selector.reg),
+      constant(index)
+    )
+    let miss = parser.emitFalseJump(parser.code.len, condition)
+    parser.release(condition)
+    parser.labelJump(op)
+    if op == GosubOp:
+      ends.add parser.emit(JumpOp, -1)
+    parser.patchFalseJump(miss, parser.code.len)
+    if parser.current.kind != CommaToken:
+      break
+    inc parser.pos
+    inc index
+  for location in ends:
+    parser.code[location].a = int32(parser.code.len)
+  parser.release(selector)
+  parser.lineEnd
+
+proc parseReturn(parser: var Parser) =
+  ## Returns from GOSUB, retaining bare RETURN as a SUB exit alias.
+  discard parser.advance
+  if parser.statementEnd:
+    discard parser.emit(ReturnOp)
+  else:
+    parser.labelJump(ReturnLabelOp)
   parser.lineEnd
 
 proc parseExit(parser: var Parser) =
-  ## Compiles QBasic-style exit sub syntax.
+  ## Compiles EXIT SUB, EXIT FOR, and EXIT DO.
   let token = parser.advance
-  parser.expectKeyword("sub")
-  if parser.routineId == 0:
-    fail(token, "exit sub can only be used inside a subroutine")
-  discard parser.emit(ReturnOp)
+  if parser.atKeyword("sub"):
+    inc parser.pos
+    if parser.routineId == 0:
+      fail(token, "exit sub can only be used inside a subroutine")
+    discard parser.emit(ExitSubOp)
+  else:
+    let kind =
+      if parser.atKeyword("for"):
+        ForLoop
+      elif parser.atKeyword("do"):
+        DoLoop
+      else:
+        fail(parser.current, "expected SUB, FOR, or DO after EXIT")
+    inc parser.pos
+    var found = false
+    for i in countdown(parser.loops.high, 0):
+      if parser.loops[i].kind == kind:
+        parser.loops[i].exits.add parser.emit(JumpOp, -1)
+        found = true
+        break
+    if not found:
+      fail(token, "EXIT has no enclosing loop of that kind")
   parser.lineEnd
 
 proc parseStatement(parser: var Parser) =
   ## Compiles one complete BASIC statement.
-  while parser.pos < parser.endPos and
-      parser.current.kind == NewlineToken:
-    inc parser.pos
+  parser.skipLabels
   if parser.pos >= parser.endPos or parser.current.kind == EndToken:
     return
   if parser.routineId == 0:
@@ -1723,6 +2180,22 @@ proc parseStatement(parser: var Parser) =
     parser.parseIf
   elif parser.atKeyword("while"):
     parser.parseWhile
+  elif parser.atKeyword("for"):
+    parser.parseFor
+  elif parser.atKeyword("do"):
+    parser.parseDo
+  elif parser.atKeyword("select"):
+    parser.parseSelect
+  elif parser.atKeyword("on"):
+    parser.parseOn
+  elif parser.atKeyword("goto") or parser.atKeyword("gosub"):
+    let op =
+      if parser.advance.isKeyword("goto"):
+        JumpOp
+      else:
+        GosubOp
+    parser.labelJump(op)
+    parser.lineEnd
   elif parser.atKeyword("print"):
     parser.parsePrint
   elif parser.atKeyword("return"):
@@ -1735,14 +2208,15 @@ proc parseStatement(parser: var Parser) =
     parser.lineEnd
   elif parser.atKeyword("end"):
     let token = parser.advance
-    if parser.atKeyword("if") or parser.atKeyword("sub"):
-      fail(token, "unexpected block terminator")
+    if parser.atKeyword("if") or parser.atKeyword("sub") or
+      parser.atKeyword("select"):
+        fail(token, "unexpected block terminator")
     discard parser.emit(HaltOp)
     parser.lineEnd
   elif parser.atKeyword("rem"):
     while parser.pos < parser.endPos and
-        parser.current.kind notin {NewlineToken, EndToken}:
-      inc parser.pos
+      parser.current.kind notin {NewlineToken, EndToken}:
+        inc parser.pos
     parser.lineEnd
   elif parser.atKeyword("call"):
     discard parser.advance
@@ -1761,11 +2235,8 @@ proc parseStatement(parser: var Parser) =
   elif parser.current.kind == IdentifierToken:
     let name = parser.advance
     if parser.current.kind == EqualToken or
-        parser.compiler[].program.arrayIds.getOrDefault(
-          name.text,
-          -1'i32
-        ) >= 0:
-      parser.parseAssignment(name)
+      parser.compiler[].program.arrayIds.getOrDefault(name.text, -1'i32) >= 0:
+        parser.parseAssignment(name)
     elif parser.current.kind == LeftParenToken:
       parser.parseCall(name)
     else:
@@ -1801,7 +2272,7 @@ proc workCost(item: Instruction): int32 {.inline.} =
     8
   of JumpUnlessGlobalModuloEqualZeroOp:
     9
-  of CallOp:
+  of CallOp, GosubOp:
     8
   of ArrayGetOp, ArraySetOp:
     2
@@ -1820,7 +2291,7 @@ proc meter(raw: seq[Instruction]): seq[Instruction] =
         fail("compiler produced an invalid branch target")
       starts[int(target)] = true
     case item.op
-    of JumpOp:
+    of JumpOp, GosubOp, ReturnLabelOp:
       markTarget(item.a)
       if i + 1 < raw.len:
         starts[i + 1] = true
@@ -1838,7 +2309,7 @@ proc meter(raw: seq[Instruction]): seq[Instruction] =
       markTarget(item.c)
       if i + 1 < raw.len:
         starts[i + 1] = true
-    of HostCallOp, CallOp, ReturnOp, HaltOp:
+    of HostCallOp, CallOp, ReturnOp, ExitSubOp, HaltOp:
       if i + 1 < raw.len:
         starts[i + 1] = true
     else:
@@ -1863,7 +2334,7 @@ proc meter(raw: seq[Instruction]): seq[Instruction] =
     inc i
   for item in result.mitems:
     case item.op
-    of JumpOp:
+    of JumpOp, GosubOp, ReturnLabelOp:
       item.a = targets[int(item.a)]
     of JumpIfZeroOp:
       item.b = targets[int(item.b)]
@@ -1887,6 +2358,7 @@ proc appendRoutine(compiler: var Compiler, routineId: int32) =
     pos: routine.bodyStart,
     endPos: routine.bodyEnd,
     parameterIds: initOrderedTable[string, int32](),
+    labels: initOrderedTable[string, int32](),
     nextTemp: routine.parameterCount,
     maxTemps: routine.parameterCount
   )
@@ -1897,12 +2369,17 @@ proc appendRoutine(compiler: var Compiler, routineId: int32) =
   if routineId == 0:
     discard parser.emit(HaltOp)
   else:
-    discard parser.emit(ReturnOp)
+    discard parser.emit(ExitSubOp)
+  for jump in parser.jumps:
+    let target = parser.labels.getOrDefault(jump.name, -1'i32)
+    if target < 0:
+      fail(jump.token, "unknown label '" & jump.name & "' in this routine")
+    parser.code[jump.instruction].a = target
   var code = meter(parser.code)
   let base = int32(compiler.program.code.len)
   for item in code.mitems:
     case item.op
-    of JumpOp:
+    of JumpOp, GosubOp, ReturnLabelOp:
       item.a += base
     of JumpIfZeroOp:
       item.b += base
@@ -2009,7 +2486,7 @@ proc verify(program: Program) =
         requireRegister(item.a)
         requireRegister(item.b)
         requireRegister(item.c)
-      of JumpOp:
+      of JumpOp, GosubOp, ReturnLabelOp:
         requireTarget(item.a)
       of JumpIfZeroOp:
         requireRegister(item.a)
@@ -2062,10 +2539,10 @@ proc verify(program: Program) =
           fail("compiler produced an invalid print literal")
       of PrintValueOp:
         requireRegister(item.a)
-      of ReturnOp:
+      of ExitSubOp:
         if routineId == 0:
           fail("compiler produced a return in the main routine")
-      of HaltOp, PrintNewlineOp:
+      of ReturnOp, HaltOp, PrintNewlineOp:
         discard
 
 proc configureHost(
@@ -2106,7 +2583,7 @@ proc compileProgram(
   limits.validate
   var compiler = Compiler(
     limits: limits,
-    tokens: lex(source, limits),
+    tokens: prepareTokens(lex(source, limits)),
     program: Program(),
     literalIds: initOrderedTable[string, int32](),
     subEnds: initOrderedTable[int, int]()
@@ -2429,6 +2906,21 @@ proc chargePrint(runtime: var Runtime, bytes: int64) =
   inc runtime.printedEvents
   runtime.printedBytes += bytes
 
+proc leaveFrame(runtime: var Runtime) =
+  ## Restores a caller and propagates shared GOSUB parameter values.
+  if runtime.depth == 0:
+    fail("BASIC RETURN without GOSUB or SUB call")
+  dec runtime.depth
+  let frame = runtime.frames[int(runtime.depth)]
+  if frame.kind == GosubFrame:
+    let count = runtime.program.routines[int(runtime.routine)].parameterCount
+    for i in 0 ..< int(count):
+      runtime.registers[int(frame.base) + i] =
+        runtime.registers[int(runtime.base) + i]
+  runtime.base = frame.base
+  runtime.routine = frame.routine
+  runtime.pc = frame.returnPc
+
 proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
   ## Executes verified bytecode with bounded work, memory, calls, and output.
   if runtime.finished:
@@ -2647,15 +3139,24 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
       if item.a >= 0:
         register(item.a) = value
       inc runtime.pc
-    of CallOp:
+    of CallOp, GosubOp:
       if runtime.depth + 1 >= int32(runtime.frames.len):
         fail("BASIC call depth limit exceeded")
       let
+        callee =
+          if item.op == GosubOp:
+            runtime.routine
+          else:
+            item.a
         calleeRegisters =
-          runtime.program.routines[int(item.a)].registerCount
+          runtime.program.routines[int(callee)].registerCount
         calleeParameters =
-          int(runtime.program.routines[int(item.a)].parameterCount)
-        calleeEntry = runtime.program.routines[int(item.a)].entry
+          int(runtime.program.routines[int(callee)].parameterCount)
+        calleeEntry =
+          if item.op == GosubOp:
+            item.a
+          else:
+            runtime.program.routines[int(callee)].entry
         callerRegisters =
           runtime.program.routines[int(runtime.routine)].registerCount
         nextBase = runtime.base + callerRegisters
@@ -2665,28 +3166,45 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
       runtime.frames[int(runtime.depth)] = Frame(
         base: runtime.base,
         routine: runtime.routine,
-        returnPc: runtime.pc + 1
+        returnPc: runtime.pc + 1,
+        kind:
+          if item.op == GosubOp:
+            GosubFrame
+          else:
+            SubFrame
       )
       if calleeRegisters > 0:
-        zeroMem(
-          addr runtime.registers[int(nextBase)],
-          int(calleeRegisters) * sizeof(int32)
-        )
-      for i in 0 ..< calleeParameters:
-        runtime.registers[int(nextBase) + i] = runtime.arguments[i]
+        if item.op == GosubOp:
+          copyMem(
+            addr runtime.registers[int(nextBase)],
+            addr runtime.registers[int(runtime.base)],
+            int(calleeRegisters) * sizeof(int32)
+          )
+        else:
+          zeroMem(
+            addr runtime.registers[int(nextBase)],
+            int(calleeRegisters) * sizeof(int32)
+          )
+      if item.op == CallOp:
+        for i in 0 ..< calleeParameters:
+          runtime.registers[int(nextBase) + i] = runtime.arguments[i]
       inc runtime.depth
       runtime.base = nextBase
-      runtime.routine = item.a
+      runtime.routine = callee
       runtime.pc = calleeEntry
     of ReturnOp:
-      if runtime.depth == 0:
-        runtime.finished = true
-      else:
-        dec runtime.depth
-        let frame = runtime.frames[int(runtime.depth)]
-        runtime.base = frame.base
-        runtime.routine = frame.routine
-        runtime.pc = frame.returnPc
+      runtime.leaveFrame
+    of ReturnLabelOp:
+      if runtime.depth == 0 or
+        runtime.frames[int(runtime.depth) - 1].kind != GosubFrame:
+          fail("BASIC RETURN label without GOSUB")
+      runtime.leaveFrame
+      runtime.pc = item.a
+    of ExitSubOp:
+      while runtime.depth > 0 and
+        runtime.frames[int(runtime.depth) - 1].kind == GosubFrame:
+          runtime.leaveFrame
+      runtime.leaveFrame
     of HaltOp:
       runtime.finished = true
     of PrintTextOp:

@@ -259,3 +259,53 @@ timeIt("execute string find", BenchRuns):
   let stats = stringFindRuntime.run
   keep(stats.workUnits)
   keep(stringFindRuntime.getGlobal("found"))
+
+block:
+  const
+    ForSource = """
+for i = 1 to 100000
+  total = total + i
+next
+"""
+    GotoSource = """
+i = 0
+again:
+i = i + 1
+total = total + i
+if i < 100000 then goto again
+"""
+    SelectSource = """
+for i = 1 to 100000
+  select case i mod 3
+  case 0
+    total = total + 1
+  case 1
+    total = total + 2
+  case else
+    total = total + 3
+  end select
+next
+"""
+    GosubSource = """
+for i = 1 to 100000
+  gosub increment
+next
+goto done
+increment:
+total = total + i
+return
+done:
+end
+"""
+  for (name, source) in [
+    ("execute FOR", ForSource),
+    ("execute GOTO", GotoSource),
+    ("execute SELECT", SelectSource),
+    ("execute GOSUB", GosubSource)
+  ]:
+    let program = compile(source, limits)
+    var runtime = initRuntime(program, limits)
+    timeIt(name, BenchRuns):
+      runtime.reset
+      discard runtime.run
+      keep(runtime.getGlobal("total"))

@@ -1,6 +1,7 @@
 import
   std/strutils,
-  basic
+  basic,
+  test_controls
 
 proc errorContains(
     action: proc() {.closure.},
@@ -387,7 +388,7 @@ block:
   )
   doAssert errorContains(
     proc() = discard compile("goto = 10\n"),
-    "not a scalar variable"
+    "expected a label"
   )
 
 echo "Testing malformed source remains a controlled BASIC error"

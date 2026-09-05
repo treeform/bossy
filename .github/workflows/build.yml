@@ -30,6 +30,8 @@ jobs:
       - run: nim r tests/tests.nim
       - name: Test release execution
         run: nim r -d:release tests/tests.nim
+      - name: Test explicit sandbox checks
+        run: nim r -d:danger tests/tests.nim
       - name: Run examples
         run: |
           nim r examples/hello.nim

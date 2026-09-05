@@ -6,24 +6,38 @@
 ![GitHub](https://img.shields.io/github/license/treeform/basic)
 ![GitHub issues](https://img.shields.io/github/issues/treeform/basic)
 
-# basic - A small, embeddable BASIC compiler and virtual machine.
+# basic - A sandboxed BASIC VM for game modes and bots.
 
-Compile a script once, create independent runtimes, and expose Nim data and
-functions through a small host API. The library uses only Nim's standard
-library and requires Nim 2.2.10 or newer.
+Basic is designed for safely running game modes, bots, and other scripts
+downloaded from other people. Embed it in a Nim game and expose only the data
+and actions each script is allowed to use. Configurable execution and memory
+limits keep script workloads bounded.
+
+Compile a script once and create independent runtimes for players or bots.
+The library uses only Nim's standard library and requires Nim 2.2.10 or newer.
 
 ## About
 
-Basic is extracted from Polyworld's BASIC interpreter. It supports int32
-arithmetic, arrays, structured control flow, subroutines, native callbacks,
-bounded output, and optional strings represented by integer handles.
+Scripts support int32 arithmetic, arrays, structured control flow,
+subroutines, native callbacks, bounded output, and optional strings
+represented by integer handles.
 
-This repository is private while the standalone package is reviewed. It has
-not been submitted to the Nimble package index. Polyworld retains its own copy.
-See [extraction notes](docs/extraction.md) for the source revision.
+The sandbox gives the game control over each script's capabilities and cost:
 
-> **AI disclaimer: This extraction, packaging, and documentation were prepared
-> with AI assistance.**
+- Scripts have no built-in file, network, or operating system access. They
+  interact with the game through the host data and callbacks you register.
+- Instruction and work budgets stop runaway loops with a catchable
+  `BasicError`, so the host can handle a failed bot or game mode.
+- Runtime storage, arrays, call depth, string storage, and output have
+  configurable limits. Array and string access use explicit bounds checks.
+- Each runtime owns its numeric state. The host decides which game state
+  scripts can observe or change.
+
+This repository is private while the package is reviewed. It has not been
+submitted to the Nimble package index.
+
+> **AI disclaimer: This package and its documentation were prepared with AI
+> assistance.**
 
 ## Install
 
@@ -92,7 +106,7 @@ Each runtime has its own numeric state and can share the compiled `Program`.
 Callbacks can still share captured Nim state. Create separate callback state
 and string pools when runtimes need to be isolated.
 
-## Limits and errors
+## Runtime and memory limits
 
 Pass the same customized `Limits` to `compile` and `initRuntime`. Start with
 `defaultLimits()` and adjust source size, bytecode size, array capacity,
@@ -100,11 +114,36 @@ globals, syntax depth, call depth, logical runtime memory, instruction count,
 work units, or output limits as needed. Invalid scripts and exceeded limits
 raise `BasicError`.
 
-The memory limit accounts for logical VM storage. It excludes compiled
-programs, compiler allocations, allocator overhead, and native callback
-memory. Optional strings have separate `StringLimits`. Native callbacks are
-trusted Nim code and must bound their own time, allocations, and side effects.
-Their declared work cost does not interrupt a callback while it runs.
+The defaults include:
+
+| Resource | Default limit |
+| --- | --- |
+| Source size | 1 MiB |
+| VM instructions per execution budget | 10,000,000 |
+| VM work units per execution budget | 10,000,000 |
+| Logical runtime memory | 64 MiB |
+| Call depth | 64 frames |
+| Print output per execution budget | 1 MiB and 100,000 events |
+| Optional string pool | 64 KiB and 256 handles |
+| Individual string length | 1,024 bytes |
+
+Choose budgets that fit your game's update loop and number of active bots.
+`restart` and `reset` replenish the execution and output budgets, allowing
+the host to grant a fresh budget for each turn or decision. Work units charge
+operations according to their cost, including the declared cost of native
+callbacks. These are deterministic operation limits, not a wall-clock timeout.
+
+The VM allocates its numeric runtime storage up front. Its memory limit
+accounts for logical storage such as globals, arrays, registers, and call
+frames. It excludes compiled programs, compiler allocations, allocator
+overhead, and native callback memory. Optional strings have separate
+`StringLimits`. Account for these separately when setting a total memory
+budget for many scripts.
+
+Native callbacks are trusted Nim code and define the sandbox's capabilities.
+Validate their arguments and bound their time, allocations, and side effects.
+Their declared work cost does not interrupt a callback while it runs. Only
+register operations that downloaded scripts should be allowed to perform.
 
 `run` executes until completion or an error. It does not yield after a budget
 is exhausted. On an error, state can contain partial changes. Use `restart`

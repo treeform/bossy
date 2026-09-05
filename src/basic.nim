@@ -33,6 +33,7 @@ const
   LogicalFrameBytes = 16'i64
   LogicalHostCallbackBytes = 32'i64
   LogicalValueBytes = 16'i64
+  NotPrecedence = 6
   EmptyArguments: array[0, int32] = []
 
 type
@@ -161,6 +162,8 @@ type
     AndOp,
     OrOp,
     XorOp,
+    EqvOp,
+    ImpOp,
     NotOp,
     JumpOp,
     JumpIfZeroOp,
@@ -647,8 +650,8 @@ proc isKeyword(token: Token, word: string): bool
 proc isReserved(name: string): bool =
   ## Returns whether a name is reserved by the BASIC grammar.
   case name
-  of "and", "call", "case", "dim", "do", "else", "elseif", "end",
-      "exit", "false", "for", "gosub", "goto", "if", "is", "let",
+  of "and", "call", "case", "dim", "do", "else", "elseif", "end", "eqv",
+      "exit", "false", "for", "gosub", "goto", "if", "imp", "is", "let",
       "loop", "mod", "next", "not", "on", "or", "print", "rem",
       "return", "select", "step", "stop", "sub", "then", "to", "true",
       "until", "wend", "while", "xor":
@@ -1131,15 +1134,17 @@ proc evaluate(op: Op, left, right: Value): Value =
   of DivideOp: left / right
   of IntegerDivideOp: left div right
   of ModuloOp: left mod right
-  of EqualOp: int32(left == right)
-  of NotEqualOp: int32(left != right)
-  of LessOp: int32(left < right)
-  of LessEqualOp: int32(left <= right)
-  of GreaterOp: int32(left > right)
-  of GreaterEqualOp: int32(left >= right)
-  of AndOp: int32(left != 0 and right != 0)
-  of OrOp: int32(left != 0 or right != 0)
-  of XorOp: int32((left != 0) xor (right != 0))
+  of EqualOp: toValue(left == right)
+  of NotEqualOp: toValue(left != right)
+  of LessOp: toValue(left < right)
+  of LessEqualOp: toValue(left <= right)
+  of GreaterOp: toValue(left > right)
+  of GreaterEqualOp: toValue(left >= right)
+  of AndOp: left and right
+  of OrOp: left or right
+  of XorOp: left xor right
+  of EqvOp: eqv(left, right)
+  of ImpOp: imp(left, right)
   else: fail("invalid constant operation")
 
 proc binaryResult(
@@ -1178,28 +1183,30 @@ proc binaryResult(
 proc precedence(token: Token, op: var Op): int =
   ## Returns the precedence and opcode of a binary operator.
   case token.kind
-  of EqualToken: op = EqualOp; 3
-  of NotEqualToken: op = NotEqualOp; 3
-  of LessToken: op = LessOp; 3
-  of LessEqualToken: op = LessEqualOp; 3
-  of GreaterToken: op = GreaterOp; 3
-  of GreaterEqualToken: op = GreaterEqualOp; 3
-  of PlusToken: op = AddOp; 4
-  of MinusToken: op = SubtractOp; 4
-  of StarToken: op = MultiplyOp; 5
-  of SlashToken: op = DivideOp; 5
-  of BackslashToken: op = IntegerDivideOp; 5
+  of EqualToken: op = EqualOp; 7
+  of NotEqualToken: op = NotEqualOp; 7
+  of LessToken: op = LessOp; 7
+  of LessEqualToken: op = LessEqualOp; 7
+  of GreaterToken: op = GreaterOp; 7
+  of GreaterEqualToken: op = GreaterEqualOp; 7
+  of PlusToken: op = AddOp; 8
+  of MinusToken: op = SubtractOp; 8
+  of StarToken: op = MultiplyOp; 9
+  of SlashToken: op = DivideOp; 9
+  of BackslashToken: op = IntegerDivideOp; 9
   of IdentifierToken:
     case token.text
-    of "or": op = OrOp; 1
-    of "xor": op = XorOp; 1
-    of "and": op = AndOp; 2
-    of "mod": op = ModuloOp; 5
+    of "imp": op = ImpOp; 1
+    of "eqv": op = EqvOp; 2
+    of "xor": op = XorOp; 3
+    of "or": op = OrOp; 4
+    of "and": op = AndOp; 5
+    of "mod": op = ModuloOp; 9
     else: 0
   else: 0
 
 proc parseExpression(parser: var Parser, minimum = 1): Expr
-
+  ## Parses an expression starting at the requested precedence level.
 
 proc parseHostCall(
     parser: var Parser,
@@ -1231,7 +1238,7 @@ proc parsePrimary(parser: var Parser): Expr =
     parser.leaveSyntax
   of IdentifierToken:
     if token.text == "true":
-      return constant(1)
+      return constant(-1)
     if token.text == "false":
       return constant(0)
     let hostData =
@@ -1288,7 +1295,7 @@ proc parsePrimary(parser: var Parser): Expr =
     fail(token, "expected a numeric expression")
 
 proc parseUnary(parser: var Parser): Expr =
-  ## Parses unary plus, minus, and logical not.
+  ## Parses numeric prefixes and NOT with its comparison-level operand.
   if parser.current.kind == PlusToken:
     inc parser.pos
     parser.enterSyntax
@@ -1317,10 +1324,10 @@ proc parseUnary(parser: var Parser): Expr =
   if parser.atKeyword("not"):
     inc parser.pos
     parser.enterSyntax
-    var value = parser.parseUnary
+    var value = parser.parseExpression(NotPrecedence)
     parser.leaveSyntax
     if value.constant:
-      return constant(int32(value.value == 0))
+      return constant(not value.value)
     parser.materialize(value)
     let destination =
       if value.temporary:
@@ -2596,7 +2603,7 @@ proc verify(program: Program) =
         requireGlobal(item.c)
       of AddOp, SubtractOp, MultiplyOp, DivideOp, IntegerDivideOp,
           ModuloOp, EqualOp, NotEqualOp, LessOp, LessEqualOp,
-          GreaterOp, GreaterEqualOp, AndOp, OrOp, XorOp:
+          GreaterOp, GreaterEqualOp, AndOp, OrOp, XorOp, EqvOp, ImpOp:
         if program.disableFloats and item.op == DivideOp:
           fail("compiler emitted floating-point division while disabled")
         requireRegister(item.a)
@@ -3178,40 +3185,40 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
       register(item.a) = -register(item.b)
       inc runtime.pc
     of EqualOp:
-      register(item.a) = int32(register(item.b) == register(item.c))
+      register(item.a) = toValue(register(item.b) == register(item.c))
       inc runtime.pc
     of NotEqualOp:
-      register(item.a) = int32(register(item.b) != register(item.c))
+      register(item.a) = toValue(register(item.b) != register(item.c))
       inc runtime.pc
     of LessOp:
-      register(item.a) = int32(register(item.b) < register(item.c))
+      register(item.a) = toValue(register(item.b) < register(item.c))
       inc runtime.pc
     of LessEqualOp:
-      register(item.a) = int32(register(item.b) <= register(item.c))
+      register(item.a) = toValue(register(item.b) <= register(item.c))
       inc runtime.pc
     of GreaterOp:
-      register(item.a) = int32(register(item.b) > register(item.c))
+      register(item.a) = toValue(register(item.b) > register(item.c))
       inc runtime.pc
     of GreaterEqualOp:
-      register(item.a) = int32(register(item.b) >= register(item.c))
+      register(item.a) = toValue(register(item.b) >= register(item.c))
       inc runtime.pc
     of AndOp:
-      register(item.a) = int32(
-        register(item.b) != 0 and register(item.c) != 0
-      )
+      register(item.a) = register(item.b) and register(item.c)
       inc runtime.pc
     of OrOp:
-      register(item.a) = int32(
-        register(item.b) != 0 or register(item.c) != 0
-      )
+      register(item.a) = register(item.b) or register(item.c)
       inc runtime.pc
     of XorOp:
-      register(item.a) = int32(
-        (register(item.b) != 0) xor (register(item.c) != 0)
-      )
+      register(item.a) = register(item.b) xor register(item.c)
+      inc runtime.pc
+    of EqvOp:
+      register(item.a) = eqv(register(item.b), register(item.c))
+      inc runtime.pc
+    of ImpOp:
+      register(item.a) = imp(register(item.b), register(item.c))
       inc runtime.pc
     of NotOp:
-      register(item.a) = int32(register(item.b) == 0)
+      register(item.a) = not register(item.b)
       inc runtime.pc
     of JumpOp:
       runtime.pc = item.a
@@ -3754,7 +3761,7 @@ proc addStringFunctions*(host: var Host, pool: StringPool) =
   discard host.addFunction("strFind", 3, strFindProc, searchCost)
 
   let strEqProc: HostProc = proc(arguments: openArray[int32]): int32 =
-    int32(pool.getString(arguments[0]) == pool.getString(arguments[1]))
+    toValue(pool.getString(arguments[0]) == pool.getString(arguments[1])).asInt
   discard host.addFunction("strEq", 2, strEqProc, linearCost)
 
   let strCmpProc: HostProc = proc(arguments: openArray[int32]): int32 =

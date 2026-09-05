@@ -50,7 +50,7 @@ zero = 1e-512
   doAssert runtime.getGlobal("integer") == 3
   doAssert runtime.getGlobal("remainder") == 1
   doAssert runtime.getGlobal("wrapped") == low(int32)
-  doAssert runtime.getGlobal("boolean") == 1
+  doAssert runtime.getGlobal("boolean") == -1
   doAssert runtime.getGlobalValue("boolean").kind == IntegerValue
   doAssert errorContains(
     proc() = discard runtime.getGlobal("fraction"), "exact int32"
@@ -84,7 +84,7 @@ block:
             "value " & op & " 1"
         var runtime = initRuntime(compile(
           "expected = " & condition & "\n" &
-          "if " & condition & " then actual = 1 else actual = 0"
+          "if " & condition & " then actual = -1 else actual = 0"
         ))
         runtime.setGlobal("value", value)
         discard runtime.run

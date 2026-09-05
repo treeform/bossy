@@ -1,7 +1,7 @@
 import
   std/strutils,
   basic,
-  test_controls, test_floats
+  test_controls, test_floats, test_booleans
 
 proc errorContains(
     action: proc() {.closure.},
@@ -26,7 +26,7 @@ let oldStyle = value + 1
   doAssert runtime.getGlobal("value") == 14
   doAssert runtime.getGlobal("VALUE") == 14
   doAssert runtime.getGlobal("wrapped") == low(int32)
-  doAssert runtime.getGlobal("logic") == 1
+  doAssert runtime.getGlobal("logic") == -1
   doAssert runtime.getGlobal("oldStyle") == 15
 
 echo "Testing BASIC arrays and while loops"
@@ -523,7 +523,7 @@ absent = strFind(message, strNew("retreat"), 0)
   pool.bindProgram(program)
   var runtime = initRuntime(program, host)
   discard runtime.run
-  doAssert runtime.getGlobal("isAttack") == 1
+  doAssert runtime.getGlobal("isAttack") == -1
   doAssert runtime.getGlobal("x") == 12
   doAssert runtime.getGlobal("y") == 34
   doAssert runtime.getGlobal("words") == 3

@@ -335,3 +335,25 @@ wend
     integerRuntime.reset
     discard integerRuntime.run
     keep(integerRuntime.getGlobal("total"))
+
+block:
+  const MaskSource = """
+i = 0
+flags = 0
+while i < 1000000
+  flags = (flags xor i) and 255
+  enabled = flags and 16
+  i = i + 1
+wend
+"""
+  var maskLimits = benchLimits()
+  maskLimits.disableFloats = true
+  var maskRuntime = initRuntime(
+    compile(MaskSource, maskLimits),
+    maskLimits
+  )
+  timeIt("execute Boolean masks", BenchRuns):
+    maskRuntime.reset
+    discard maskRuntime.run
+    doAssert maskRuntime.getGlobal("flags") == 0
+    doAssert maskRuntime.getGlobal("enabled") == 0

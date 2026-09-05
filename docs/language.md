@@ -81,11 +81,63 @@ constants belong to the shared program, outside the runtime memory budget.
 The instruction, work, call-depth, and output limits apply in both modes.
 See [the numeric host example](../examples/floats.nim).
 
-Comparisons use `=`, `<>`, `<`, `<=`, `>`, and `>=`. Boolean operators are
-`and`, `or`, `xor`, and `not`. Zero is false and any nonzero value is true.
-Boolean results, `true`, and `false` are 1 and 0. Boolean operators evaluate
-both operands. Use nested `if` statements when evaluating the right operand
-would be unsafe or would perform an unwanted host action.
+### Booleans and bitwise operators
+
+Comparisons use `=`, `<>`, `<`, `<=`, `>`, and `>=`. They return integer -1
+for true and 0 for false. The `true` and `false` constants use the same
+representation. Conditions in `if`, `while`, and `until` consider every
+nonzero value true, including fractional values such as `0.5`.
+
+Logical operators work on all 32 bits of their integer operands:
+
+| Operator | Operation | Example | Result |
+| --- | --- | --- | --- |
+| `not` | Complement every bit. | `not 1` | -2 |
+| `and` | Keep bits present in both operands. | `6 and 3` | 2 |
+| `or` | Keep bits present in either operand. | `6 or 3` | 7 |
+| `xor` | Keep bits present in exactly one operand. | `6 xor 3` | 5 |
+| `eqv` | Complement XOR. | `6 eqv 3` | -6 |
+| `imp` | Complement the left operand, then OR. | `6 imp 3` | -5 |
+
+With operands of -1 and 0, these operations also produce Boolean results.
+Use `flags and mask` to test a bit mask. For other nonzero values, `not`
+complements the bits instead of testing whether the value is zero. For
+example, `not 1` is -2, which is still true in a condition. Use `value = 0`
+to test falseness and `value <> 0` to normalize a value to -1 or 0.
+
+Arithmetic binds more tightly than comparisons. Comparisons bind more
+tightly than `not`, followed by `and`, `or`, `xor`, `eqv`, and `imp`, in that
+order. Thus `not x = 1` means `not (x = 1)`, and `1 xor 1 or 1` is 0.
+Parentheses override precedence. Binary logical operators evaluate both
+operands, including host function calls. Use nested `if` statements when
+evaluating the right operand would be unsafe or perform an unwanted action.
+
+Float operands of logical operators are rounded to the nearest integer,
+with exact halves rounded to the even integer. For example, `1.5 and -1`
+is 2, `2.5 and -1` is 2, and `0.5 and -1` is 0. Operands outside the int32
+range raise `BasicError`. Rounding applies only to logical operators.
+Array indices, string handles, integer division, and integer host callbacks
+continue to require exact int32 values. When floats are disabled, logical
+operations use only integers.
+
+In Nim, `toValue(true)` produces integer -1 and `toValue(false)` produces
+zero. Setters and `NumericHostProc` results accept Nim Booleans through this
+converter. Use `value.asBool` to test a numeric value as a condition without
+rounding. Integer host callbacks that represent Boolean predicates should
+return -1 or 0. The built-in `strEq` follows this convention. Ordinary numeric
+callback results are preserved, including 1.
+
+This changes earlier versions that returned 1 for true and treated logical
+operators as truth tests. Update scripts that explicitly compare a Boolean
+to 1, and use `value = 0` when you need a truth test instead of bitwise NOT.
+`eqv` and `imp` are now reserved keywords.
+
+The logical rules follow the [QuickBASIC language reference][logical-reference]
+and its [documented rounding convention][rounding-reference]. The VM uses
+32-bit integers for all bit operations.
+
+[logical-reference]: https://www.pcjs.org/documents/books/mspl13/basic/qblang/
+[rounding-reference]: https://jeffpar.github.io/kbarchive/kb/023/Q23389/
 
 ## Statements
 
@@ -316,7 +368,7 @@ These functions are available only after the host registers
 | `strCatInt(s, n)` | String followed by decimal integer text. |
 | `strMid(s, start, length)` | Substring with clamped start and length. |
 | `strFind(s, needle, start)` | Match offset from a clamped start, or -1. |
-| `strEq(a, b)` | 1 if the string contents are equal, otherwise 0. |
+| `strEq(a, b)` | -1 if the string contents are equal, otherwise 0. |
 | `strCmp(a, b)` | Lexical comparison as -1, 0, or 1. |
 | `strWord(s, i)` | Zero-based whitespace-separated word, or an empty string. |
 | `strWordCount(s)` | Number of whitespace-separated words. |

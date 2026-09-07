@@ -1,6 +1,6 @@
 import
   std/strutils,
-  basic
+  bossy
 
 proc execute(source: string, limits = defaultLimits()): Runtime =
   ## Runs a native string example with bounded storage.
@@ -18,7 +18,7 @@ echo "Testing native string expressions, comparisons, arrays, and SUBs"
 block:
   for disabled in [false, true]:
     var limits = defaultLimits()
-    limits.disableFloats = disabled
+    limits.disableFixed = disabled
     let runtime = execute("""
 name = 42
 name$ = "Ada"
@@ -108,7 +108,7 @@ block:
     ("chr$(255)", "\xff"), ("space$(3)", "   "), ("space$(0)", ""),
     ("string$(3, \"abc\")", "aaa"), ("string$(2, 65)", "AA"),
     ("str$(12)", " 12"), ("str$(-12)", "-12"),
-    ("str$(1.25)", " 1.25"),
+    ("str$(1.25)", " 1.25000"),
     ("left$(ucase$(\"abc\"), len(right$(\"xyz\", 2)))", "AB")
   ]:
     doAssert execute("answer$ = " & expression).

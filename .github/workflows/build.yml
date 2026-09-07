@@ -19,23 +19,37 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - name: Check out private Fixxy dependency
+        uses: actions/checkout@v5
+        with:
+          repository: treeform/fixxy
+          ref: e35b9b9f7bab725886ca1df1a0e35256cde9f93d
+          path: .dependencies/fixxy
+          ssh-key: ${{ secrets.FIXXY_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: treeform/setup-nim-action@v6
       - name: Install dependencies
         shell: bash
         run: |
+          mkdir -p "$HOME/.nimby/pkgs"
+          cp -R .dependencies/fixxy "$HOME/.nimby/pkgs/fixxy"
           cd ..
-          nimby create
-          nimby install "${{ github.event.repository.name }}/${{ github.event.repository.name }}.nimble"
-      - run: nim check src/basic.nim
+          nimby install -g "${{ github.event.repository.name }}/${{ github.event.repository.name }}.nimble"
+          nimby sync -g "${{ github.event.repository.name }}/nimby.lock"
+      - run: nim check src/bossy.nim
       - run: nim r tests/tests.nim
       - name: Test release execution
         run: nim r -d:release tests/tests.nim
       - name: Test explicit sandbox checks
         run: nim r -d:danger tests/tests.nim
+      - name: Test Fixxy overflow checks
+        run: nim r -d:fixedChecks tests/tests.nim
+      - name: Test C++ determinism
+        run: nim cpp -r -d:release tests/tests.nim
       - name: Run examples
         run: |
           nim r examples/hello.nim
           nim r examples/hosts.nim
           nim r examples/strings.nim
-          nim r examples/floats.nim
+          nim r examples/fixed.nim
           nim r examples/natural_strings.nim

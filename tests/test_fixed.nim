@@ -1,6 +1,6 @@
 import
-  std/[math, strutils],
-  basic
+  std/strutils,
+  bossy
 
 proc errorContains(action: proc() {.closure.}, expected: string): bool =
   ## Checks that invalid numeric operations remain catchable BASIC errors.
@@ -14,7 +14,7 @@ proc execute(source: string): Runtime =
   result = initRuntime(compile(source))
   discard result.run
 
-echo "Testing floating literals, mixed arithmetic, and division"
+echo "Testing fixed-point literals, mixed arithmetic, and division"
 block:
   let runtime = execute("""
 a = 1.5
@@ -23,7 +23,7 @@ c = 2.
 d = 1e-2
 e = 2.5D+1
 f = 2d-1
-large = 2147483648.0
+large = 32767.0
 sum = a + b
 product = a * 2
 difference = 2 - a
@@ -33,20 +33,20 @@ runtimeFraction = product / 2
 integer = 7 \ 2
 remainder = 7.0 mod 2.0
 wrapped = 2147483647 + 1
-promoted = 2147483647 + 1.0
+promoted = 32000 + 1.0
 boolean = a > b and not 0.0
 zero = 1e-512
 """)
   for (name, expected) in [
-    ("a", 1.5), ("b", 0.25), ("c", 2.0), ("d", 0.01),
-    ("e", 25.0), ("f", 0.2), ("large", 2147483648.0),
-    ("sum", 1.75), ("product", 3.0), ("difference", 0.5),
-    ("negative", -1.5), ("fraction", 1.5), ("runtimeFraction", 1.5),
-    ("promoted", 2147483648.0), ("zero", 0.0)
+    ("a", 1.5'fx), ("b", 0.25'fx), ("c", 2.0'fx), ("d", 0.01'fx),
+    ("e", 25.0'fx), ("f", 0.2'fx), ("large", 32767.0'fx),
+    ("sum", 1.75'fx), ("product", 3.0'fx), ("difference", 0.5'fx),
+    ("negative", -1.5'fx), ("fraction", 1.5'fx), ("runtimeFraction", 1.5'fx),
+    ("promoted", 32001.0'fx), ("zero", 0.0'fx)
   ]:
     let value = runtime.getGlobalValue(name)
-    doAssert value.kind == FloatValue
-    doAssert value.asFloat == expected, name
+    doAssert value.kind == FixedValue
+    doAssert value.asFixed == expected, name
   doAssert runtime.getGlobal("integer") == 3
   doAssert runtime.getGlobal("remainder") == 1
   doAssert runtime.getGlobal("wrapped") == low(int32)
@@ -58,7 +58,7 @@ zero = 1e-512
 
 echo "Testing folded and executed numeric expressions agree"
 block:
-  for (left, right) in [(1.5, 0.5), (-2.25, 3.0), (0.0, -0.125)]:
+  for (left, right) in [(1.5'fx, 0.5'fx), (-2.25'fx, 3.0'fx), (0.0'fx, -0.125'fx)]:
     for op in ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">=",
         "and", "or", "xor"]:
       let source =
@@ -74,7 +74,7 @@ block:
       doAssert folded == executed, source
       doAssert folded.kind == executed.kind
 
-  for value in [toValue(-1.5), toValue(0.0), toValue(0.5), toValue(3'i32)]:
+  for value in [toValue(-1.5'fx), toValue(0.0'fx), toValue(0.5'fx), toValue(3'i32)]:
     for op in ["=", "<>", "<", "<=", ">", ">="]:
       for reversed in [false, true]:
         let condition =
@@ -90,10 +90,10 @@ block:
         discard runtime.run
         doAssert runtime.getGlobal("actual") == runtime.getGlobal("expected")
 
-echo "Testing floats in arrays, fused operations, SUB, GOSUB, and loops"
+echo "Testing fixed-point values in arrays, fused operations, SUB, GOSUB, and loops"
 block:
   var host = initHost()
-  discard host.addData("delta", 0.25)
+  discard host.addData("delta", 0.25'fx)
   var runtime = initRuntime(compile("""
 dim values(3)
 sub accumulate(amount)
@@ -133,27 +133,27 @@ do
 loop until counter >= 1
 """, host), host)
   discard runtime.run
-  doAssert runtime.getArrayValue("values", 1).asFloat == 1.75
-  doAssert runtime.getGlobalValue("copy").asFloat == 3.0
-  doAssert runtime.getGlobalValue("parameterTotal").asFloat == 0.25
-  doAssert runtime.getGlobalValue("parameterAfter").asFloat == 1.0
-  doAssert runtime.getGlobalValue("ascending").asFloat == 2.5
-  doAssert runtime.getGlobalValue("descending").asFloat == 2.5
+  doAssert runtime.getArrayValue("values", 1).asFixed == 1.75'fx
+  doAssert runtime.getGlobalValue("copy").asFixed == 3.0'fx
+  doAssert runtime.getGlobalValue("parameterTotal").asFixed == 0.25'fx
+  doAssert runtime.getGlobalValue("parameterAfter").asFixed == 1.0'fx
+  doAssert runtime.getGlobalValue("ascending").asFixed == 2.5'fx
+  doAssert runtime.getGlobalValue("descending").asFixed == 2.5'fx
   doAssert runtime.getGlobal("selected") == 1
   doAssert runtime.getGlobal("counter") == 1
-  runtime.setArray("values", 0, 2.75)
-  doAssert runtime.getArrayValue("values", 0).asFloat == 2.75
+  runtime.setArray("values", 0, 2.75'fx)
+  doAssert runtime.getArrayValue("values", 0).asFixed == 2.75'fx
   doAssert errorContains(
     proc() = discard runtime.getArray("values", 0), "exact int32"
   )
   runtime.restart
-  doAssert runtime.getArrayValue("values", 0).asFloat == 2.75
+  doAssert runtime.getArrayValue("values", 0).asFixed == 2.75'fx
   runtime.reset
   doAssert runtime.getArrayValue("values", 0).kind == IntegerValue
   doAssert runtime.getArray("values", 0) == 0
   doAssert runtime.getGlobalValue("copy").kind == IntegerValue
   discard runtime.run
-  doAssert runtime.getGlobalValue("copy").asFloat == 3.0
+  doAssert runtime.getGlobalValue("copy").asFixed == 3.0'fx
 
 echo "Testing numeric callbacks, nested calls, and host data"
 block:
@@ -168,36 +168,36 @@ block:
     quarter: NumericHostProc = proc(args: openArray[Value]): Value =
       ## Supplies a fraction from a zero-argument callback.
       doAssert args.len == 0
-      0.25
+      0.25'fx
     identity: HostProc = proc(args: openArray[int32]): int32 =
       ## Preserves compatibility with integer-only native functions.
       args[0]
-  discard host.addData("delta", 0.5)
+  discard host.addData("delta", 0.5'fx)
   discard host.addFunction("add", 2, add, workUnits = 4)
   discard host.addFunction("quarter", 0, quarter)
   discard host.addFunction("identity", 1, identity)
-  doAssert host.getDataValue("delta").asFloat == 0.5
+  doAssert host.getDataValue("delta").asFixed == 0.5'fx
   doAssert errorContains(
     proc() = discard host.getData("delta"), "exact int32"
   )
-  host.setData("delta", 0.75)
+  host.setData("delta", 0.75'fx)
   let program = compile("""
 result = add(0.25, add(delta, quarter()))
 add(1.0, 2)
 whole = identity(2.0)
 """, host)
   var runtime = initRuntime(program, host)
-  doAssert runtime.getDataValue("delta").asFloat == 0.75
-  runtime.setData("delta", 1.0)
-  runtime.setData(program.hostDataIndex("delta"), 0.5)
+  doAssert runtime.getDataValue("delta").asFixed == 0.75'fx
+  runtime.setData("delta", 1.0'fx)
+  runtime.setData(program.hostDataIndex("delta"), 0.5'fx)
   discard runtime.run
-  doAssert runtime.getGlobalValue("result").asFloat == 1.0
+  doAssert runtime.getGlobalValue("result").asFixed == 1.0'fx
   doAssert runtime.getGlobal("whole") == 2
   doAssert calls == 3
   runtime.restart
-  doAssert runtime.getDataValue("delta").asFloat == 0.5
+  doAssert runtime.getDataValue("delta").asFixed == 0.5'fx
   runtime.reset
-  doAssert runtime.getDataValue("delta").asFloat == 0.5
+  doAssert runtime.getDataValue("delta").asFixed == 0.5'fx
   doAssert errorContains(
     proc() = discard runtime.getData("delta"), "exact int32"
   )
@@ -218,7 +218,7 @@ whole = identity(2.0)
     proc() = discard initRuntime(program, incompatible), "incompatible"
   )
 
-echo "Testing exact integer boundaries and non-finite rejection"
+echo "Testing exact integer boundaries and fixed-point range rejection"
 block:
   for source in [
     "dim a(1)\na(0.5) = 1", "dim a(1)\nx = a(0.5)",
@@ -229,23 +229,25 @@ block:
     "x = 1.5 \\ 2", "x = 1.5\ny = x \\ 2"
   ]:
     doAssert errorContains(proc() = discard execute(source), "exact int32")
-  for value in [Inf, NegInf, NaN]:
-    doAssert errorContains(proc() = discard toValue(value), "finite")
-  for value in [2147483648.0, -2147483649.0, 0.1, -0.1]:
+  for value in [0.1'fx, -0.1'fx]:
     doAssert errorContains(proc() = discard toValue(value).asInt, "exact int32")
-  for value in [2147483647.0, -2147483648.0, 0.0, -0.0]:
-    doAssert toValue(value).asInt == int32(value)
+  for value in [32767.0'fx, -32768.0'fx, 0.0'fx, -0.0'fx]:
+    doAssert toValue(value).asInt == value.toInt
+  for value in [high(int32), low(int32), 32768'i32, -32769'i32]:
+    doAssert errorContains(
+      proc() = discard toValue(value).asFixed, "fixed-point range"
+    )
   for source in [
     "x = 1.0 / 0", "x = 1.0\ny = x / 0.0",
     "x = 1 / -0.0", "x = 1.0 mod 0", "x = 1 \\ 0"
   ]:
     doAssert errorContains(proc() = discard execute(source), "division by zero")
   for source in [
-    "x = 1e309", "x = 1e308 * 2", "x = 1e308\ny = x * 2",
-    "x = 1e308 + 1e308", "x = -1e308\nx = x - 1e308",
-    "x = 1e308 / 1e-308"
+    "x = 1e309", "x = 32768.0", "x = -32768.1",
+    "x = 2147483648.0", "x = 32768 + 0.5",
+    "x = 32768\ny = x * 0.5", "x = 1 / 32768"
   ]:
-    doAssert errorContains(proc() = discard execute(source), "finite")
+    doAssert errorContains(proc() = discard execute(source), "range")
   var
     host = initHost()
     calls = 0
@@ -254,7 +256,7 @@ block:
     inc calls
     args[0]
   discard host.addFunction("exact", 1, exact)
-  for value in ["0.5", "2147483648.0"]:
+  for value in ["0.5", "32767.5"]:
     var runtime = initRuntime(compile("exact(" & value & ")", host), host)
     doAssert errorContains(proc() = discard runtime.run, "exact int32")
   doAssert calls == 0
@@ -265,27 +267,27 @@ block:
   var runtime = initRuntime(program, host)
   doAssert errorContains(proc() = discard runtime.run, "exact int32")
 
-echo "Testing float print formatting and output budgets"
+echo "Testing fixed-point print formatting and output budgets"
 block:
-  let program = compile("print 1.5; 0.25; -2.0; 1e100; -0.0")
+  let program = compile("print 1.5; 0.25; -2.0; 1e4; -0.0")
   var
     output = ""
-    floats: seq[float64]
+    fixedValues: seq[Fixed]
     runtime = initRuntime(program)
   let logger: PrintProc = proc(event: PrintEvent) =
     ## Preserves the exact text used for output accounting.
     case event.kind
     of TextPrint:
       output.add event.text
-    of FloatPrint:
-      floats.add event.floatValue
+    of FixedPrint:
+      fixedValues.add event.fixedValue
       output.add event.text
     of ValuePrint:
       output.add $event.value
     of NewlinePrint:
       output.add '\n'
   let stats = runtime.run(logger)
-  doAssert floats == @[1.5, 0.25, -2.0, 1e100, -0.0]
+  doAssert fixedValues == @[1.5'fx, 0.25'fx, -2.0'fx, 10000.0'fx, -0.0'fx]
   doAssert stats.printBytes == output.len
   doAssert stats.printEvents == 6
   var limits = defaultLimits()
@@ -299,9 +301,9 @@ block:
   limits.maxPrintEvents = 0
   var noEvents = initRuntime(program, limits)
   doAssert errorContains(proc() = discard noEvents.run(logger), "print event")
-  doAssert floats.len == 5
+  doAssert fixedValues.len == 5
 
-echo "Testing floats remain bounded by memory, work, and call limits"
+echo "Testing fixed-point values remain bounded by memory, work, and call limits"
 block:
   let program = compile("dim values(10)\nx = 0.5")
   var limits = defaultLimits()
@@ -317,7 +319,7 @@ block:
     proc() = discard initRuntime(program, limits), "memory limit"
   )
   for source in [
-    "for x = 1e100 to 1e100 step 0.25\nnext",
+    "for x = 1.0 to 1.0 step 0.0\nnext",
     "x = 0.0\ndo\nx = x + .25\nloop",
     "again: x = x + 0.5\ngoto again"
   ]:
@@ -338,7 +340,7 @@ recursive(0.25)
 echo "Testing integer-only policy survives runtime creation and host entry"
 block:
   var limits = defaultLimits()
-  limits.disableFloats = true
+  limits.disableFixed = true
   for source in [
     "x = 1.0", "x = .5", "x = 1e0", "x = 0.0",
     "if 0 then x = .5", "print 0.0"
@@ -366,44 +368,44 @@ wrapped = 2147483647 + 1
   doAssert runtime.getGlobal("small") == low(int32)
   doAssert runtime.getGlobal("wrapped") == low(int32)
   doAssert runtime.getGlobal("remainder") == 0
-  for value in [0.0, 0.5, 1.0]:
+  for value in [0.0'fx, 0.5'fx, 1.0'fx]:
     doAssert errorContains(proc() = runtime.setGlobal("x", value), "disabled")
     doAssert errorContains(
       proc() = inherited.setArray("a", 0, value), "disabled"
     )
   inherited.reset
   inherited.restart
-  doAssert errorContains(proc() = inherited.setGlobal("x", 0.0), "disabled")
+  doAssert errorContains(proc() = inherited.setGlobal("x", 0.0'fx), "disabled")
   doAssert errorContains(
     proc() = discard initRuntime(compile("x = 1 / 2"), limits),
-    "compile BASIC with disableFloats"
+    "compile BASIC with disableFixed"
   )
   var host = initHost()
-  discard host.addData("delta", 0.5)
+  discard host.addData("delta", 0.5'fx)
   doAssert errorContains(
     proc() = discard compile("x = delta", host, limits), "disabled"
   )
   host.setData("delta", 1)
   let bound = compile("x = delta", host, limits)
-  host.setData("delta", 0.0)
+  host.setData("delta", 0.0'fx)
   doAssert errorContains(proc() = discard initRuntime(bound, host), "disabled")
   host.setData("delta", 1)
   var boundRuntime = initRuntime(bound, host)
   doAssert errorContains(
-    proc() = boundRuntime.setData("delta", 1.0), "disabled"
+    proc() = boundRuntime.setData("delta", 1.0'fx), "disabled"
   )
   doAssert errorContains(
-    proc() = boundRuntime.setData(bound.hostDataIndex("delta"), 0.5), "disabled"
+    proc() = boundRuntime.setData(bound.hostDataIndex("delta"), 0.5'fx), "disabled"
   )
   let numeric: NumericHostProc = proc(args: openArray[Value]): Value =
-    ## Attempts to return a float even when its result is discarded.
-    0.5
+    ## Attempts to return a fixed-point value even when its result is discarded.
+    0.5'fx
   discard host.addFunction("numeric", 0, numeric)
   for source in ["x = numeric()", "numeric()"]:
     var callback = initRuntime(compile(source, host, limits), host)
     doAssert errorContains(proc() = discard callback.run, "disabled")
 
-echo "Testing malformed floating literals cannot escape BASIC errors"
+echo "Testing malformed fixed-point literals cannot escape BASIC errors"
 block:
   for literal in [
     ".", "1e", "1e+", "1d-", "1.2.3", ".e1", "1e513",
@@ -424,4 +426,115 @@ block:
     except BasicError:
       discard
 
-echo "Floating-point tests passed"
+static:
+  doAssert not compiles(toValue(1.0))
+  doAssert not compiles(toValue(1.0'f))
+  doAssert compiles(toValue(1.0'fx))
+
+echo "Testing fixed-point literal boundaries and exact comparisons"
+block:
+  let runtime = execute("""
+minimum = -32768.0
+exponentMinimum = -3.2768D4
+maximum = 32767.9999847412109375
+quantum = 0.0000152587890625
+exponentStep = 1.52587890625e-5
+positiveZero = 1e-512
+negativeZero = -1e-512
+zero = 0e512
+below = -2147483648 < minimum
+above = 2147483647 > maximum
+different = 65536 <> 0.0
+equal = -32768 = minimum
+""")
+  doAssert runtime.getGlobalValue("minimum").asFixed == FixedMinimum
+  doAssert runtime.getGlobalValue("exponentMinimum").asFixed == FixedMinimum
+  doAssert runtime.getGlobalValue("maximum").asFixed == FixedMaximum
+  doAssert runtime.getGlobalValue("quantum").asFixed == FixedEpsilon
+  doAssert runtime.getGlobalValue("exponentStep").asFixed == FixedEpsilon
+  for name in ["positiveZero", "negativeZero", "zero"]:
+    doAssert runtime.getGlobalValue(name).asFixed == FixedZero
+  for name in ["below", "above", "different", "equal"]:
+    doAssert runtime.getGlobal(name) == -1
+  for expression in ["32767.999999", "-32768.01", "3.2768e4"]:
+    doAssert errorContains(
+      proc() = discard execute("x = " & expression), "range"
+    )
+  let program = compile("""
+lower = integer < decimal
+same = integer = decimal
+higher = integer > decimal
+if integer < decimal then branch = -1
+""")
+  for integer in [low(int32), -32768'i32, 0'i32, 32767'i32, high(int32)]:
+    for decimal in [FixedMinimum, -FixedEpsilon, FixedZero, FixedMaximum]:
+      var compared = initRuntime(program)
+      compared.setGlobal("integer", integer)
+      compared.setGlobal("decimal", decimal)
+      discard compared.run
+      let
+        left = int64(integer) * 65536
+        right = int64(int32(decimal))
+      doAssert compared.getGlobal("lower") == -int32(left < right)
+      doAssert compared.getGlobal("same") == -int32(left == right)
+      doAssert compared.getGlobal("higher") == -int32(left > right)
+      doAssert compared.getGlobal("branch") == -int32(left < right)
+
+echo "Testing fixed-point overflow and quantized zero divisors"
+block:
+  for expression in ["1.0 / 1e-512", "1 / 0.0000001"]:
+    doAssert errorContains(
+      proc() = discard execute("x = " & expression), "division by zero"
+    )
+  for (expression, expected) in [
+    ("32767.0 + 1.0", FixedMinimum),
+    ("-32768.0 - 1.0", 32767.0'fx),
+    ("16384.0 * 2.0", FixedMinimum),
+    ("16384.0 / 0.5", FixedMinimum)
+  ]:
+    let parts = expression.splitWhitespace
+    for source in [
+      "x = " & expression,
+      "left = " & parts[0] & "\nx = left " & parts[1 .. ^1].join(" ")
+    ]:
+      when defined(fixedChecks):
+        doAssert errorContains(proc() = discard execute(source), "overflow")
+      else:
+        doAssert execute(source).getGlobalValue("x").asFixed == expected
+
+echo "Testing deterministic state across two thousand restarts"
+block:
+  var host = initHost()
+  discard host.addData("tick")
+  let program = compile("""
+dim values(3)
+value = value * 1.01 + 0.0000152587890625
+value = value / 1.125 - 0.03125
+values(0) = value
+values(1) = value * -0.5
+values(2) = value + tick / 128
+values(3) = value / 3
+print value
+""", host)
+  var
+    runtime = initRuntime(program, host)
+    other = initRuntime(program, host)
+    hash = 0xcbf29ce484222325'u64
+  runtime.setGlobal("value", 0.125'fx)
+  other.setGlobal("value", 0.125'fx)
+  for tick in 1 .. 2000:
+    runtime.restart
+    other.restart
+    runtime.setData("tick", tick)
+    other.setData("tick", tick)
+    doAssert runtime.run == other.run
+    for i in 0 .. 3:
+      let value = runtime.getArrayValue("values", int32(i))
+      doAssert value == other.getArrayValue("values", int32(i))
+      hash = (hash xor uint64(cast[uint32](int32(value.asFixed)))) *
+        0x100000001b3'u64
+  # Pinned against a separate integer implementation of Q16.16 arithmetic.
+  doAssert hash == 0x208814b536cb8f69'u64, toHex(hash)
+  doAssert runtime.getGlobalValue("value").asFixed == Fixed(-20020)
+
+echo "Fixed-point tests passed"

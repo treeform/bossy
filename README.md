@@ -1,24 +1,30 @@
-<img src="docs/basicBanner.svg" alt="basic, an embeddable BASIC VM for Nim">
+<img src="docs/bossyBanner.svg" alt="bossy, a fast, safe, deterministic VM for Nim">
 
-![Github Actions](https://github.com/treeform/basic/workflows/Github%20Actions/badge.svg)
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/treeform/basic)
-![GitHub Repo stars](https://img.shields.io/github/stars/treeform/basic)
-![GitHub](https://img.shields.io/github/license/treeform/basic)
-![GitHub issues](https://img.shields.io/github/issues/treeform/basic)
+![Github Actions](https://github.com/treeform/bossy/workflows/Github%20Actions/badge.svg)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/treeform/bossy)
+![GitHub Repo stars](https://img.shields.io/github/stars/treeform/bossy)
+![GitHub](https://img.shields.io/github/license/treeform/bossy)
+![GitHub issues](https://img.shields.io/github/issues/treeform/bossy)
 
-# basic - A sandboxed BASIC VM for game modes and bots.
+# bossy - A fast, safe, deterministic VM for games and untrusted scripts.
 
-Basic is designed for safely running game modes, bots, and other scripts
-downloaded from other people. Embed it in a Nim game and expose only the data
-and actions each script is allowed to use. Configurable execution and memory
-limits keep script workloads bounded.
+Bossy is an embeddable VM for running game modes, bots, and other untrusted
+scripts. It compiles a small structured BASIC dialect to a metered register
+machine. Embed it in a Nim application and expose only the data and actions
+each script is allowed to use. Configurable execution and memory limits keep
+script workloads bounded.
 
 Compile a script once and create independent runtimes for players or bots.
-The library uses only Nim's standard library and requires Nim 2.2.10 or newer.
+The library uses [Fixxy](https://github.com/treeform/fixxy) for deterministic
+Q16.16 arithmetic and requires Nim 2.2.10 or newer.
+
+Bossy was previously named `basic`. The Nim package and entry module are now
+`bossy`; update host imports to `import bossy`. The scripting language still
+uses BASIC syntax.
 
 ## About
 
-Scripts support int32 arithmetic, arrays, structured control flow,
+Scripts support int32 and fixed-point arithmetic, arrays, structured control flow,
 subroutines, native callbacks, bounded output, and optional strings
 represented by integer handles.
 
@@ -33,6 +39,11 @@ The sandbox gives the game control over each script's capabilities and cost:
 - Each runtime owns its numeric state. The host decides which game state
   scripts can observe or change.
 
+For deterministic replay, supply the same host inputs and use deterministic
+native callbacks with the same build options. The [determinism tests](docs/determinism.md)
+pin arithmetic, VM state, output, callback order, and execution budgets across
+Windows, macOS, and Linux.
+
 This repository is private while the package is reviewed. It has not been
 submitted to the Nimble package index.
 
@@ -45,17 +56,17 @@ Clone with an account that has repository access. Run these commands from
 your Nimby workspace directory:
 
 ```sh
-git clone git@github.com:treeform/basic.git
-nimby install basic/basic.nimble
+git clone git@github.com:treeform/bossy.git
+nimby install bossy/bossy.nimble
 ```
 
-The library has no external runtime dependencies. The optional benchmarks
-use `benchy`.
+Installation also requires access to the private `treeform/fixxy` dependency.
+The optional benchmarks use `benchy`.
 
 ## Quick start
 
 ```nim
-import basic
+import bossy
 
 block:
   let program = compile("answer = 6 * 7")
@@ -76,7 +87,7 @@ have a declared work cost. Compile against that host, then bind a compatible
 host when creating each runtime.
 
 ```nim
-import basic
+import bossy
 
 proc double(arguments: openArray[int32]): int32 =
   ## Doubles an int32 with wrapping arithmetic.
@@ -170,15 +181,16 @@ reading them. String operations address bytes, and case conversion is ASCII.
 
 - [BASIC language reference](docs/language.md).
 - [Host callbacks and persistent execution](examples/hosts.nim).
+- [Fixed-point values and numeric callbacks](examples/fixed.nim).
 - [String pool example](examples/strings.nim).
 
 Build the API reference locally:
 
 ```sh
-nim doc --index:on --project --out:.gh-pages src/basic.nim
+nim doc --index:on --project --out:.gh-pages src/bossy.nim
 ```
 
-Open `.gh-pages/basic.html`. The Docs workflow also saves the generated API
+Open `.gh-pages/bossy.html`. The Docs workflow also saves the generated API
 reference as a workflow artifact. Publishing with GitHub Pages is skipped
 while the repository is private.
 
@@ -187,9 +199,10 @@ while the repository is private.
 From the repository root:
 
 ```sh
-nim check src/basic.nim
+nim check src/bossy.nim
 nim r tests/tests.nim
 nim r -d:release tests/tests.nim
+nim r -d:fixedChecks tests/tests.nim
 nim r examples/hello.nim
 nim r examples/hosts.nim
 nim r examples/strings.nim
@@ -208,5 +221,5 @@ nimby install benchy
 Then run from the repository root:
 
 ```sh
-nim r -d:release tests/bench_basic.nim
+nim r -d:release tests/bench_bossy.nim
 ```

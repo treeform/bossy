@@ -1,6 +1,6 @@
 import
   benchy,
-  basic
+  bossy
 
 const
   ArithmeticIterations = 1_000_000
@@ -311,26 +311,26 @@ end
       keep(runtime.getGlobal("total"))
 
 block:
-  const FloatSource = """
+  const FixedSource = """
 i = 0
 total = 0.0
 while i < 1000000
-  total = total + 0.25
+  total = total + 0.015625
   i = i + 1
 wend
 """
   var
     integerLimits = benchLimits()
-    floatRuntime = initRuntime(compile(FloatSource, limits), limits)
-  integerLimits.disableFloats = true
+    fixedRuntime = initRuntime(compile(FixedSource, limits), limits)
+  integerLimits.disableFixed = true
   var integerRuntime = initRuntime(
     compile(ArithmeticSource, integerLimits),
     integerLimits
   )
-  timeIt("execute floats", BenchRuns):
-    floatRuntime.reset
-    discard floatRuntime.run
-    doAssert floatRuntime.getGlobalValue("total").asFloat == 250000.0
+  timeIt("execute fixed-point", BenchRuns):
+    fixedRuntime.reset
+    discard fixedRuntime.run
+    doAssert fixedRuntime.getGlobalValue("total").asFixed == 15625.0'fx
   timeIt("execute integer-only arithmetic", BenchRuns):
     integerRuntime.reset
     discard integerRuntime.run
@@ -347,7 +347,7 @@ while i < 1000000
 wend
 """
   var maskLimits = benchLimits()
-  maskLimits.disableFloats = true
+  maskLimits.disableFixed = true
   var maskRuntime = initRuntime(
     compile(MaskSource, maskLimits),
     maskLimits

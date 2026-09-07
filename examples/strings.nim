@@ -1,4 +1,4 @@
-import basic
+import bossy
 
 block:
   var host = initHost()

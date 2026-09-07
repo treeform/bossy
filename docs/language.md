@@ -7,81 +7,109 @@ This is a small structured BASIC dialect for embedded scripts.
 Identifiers and keywords are case-insensitive. Identifiers start with a
 letter or underscore, followed by letters, digits, or underscores, with an
 optional trailing `$` for strings. Scalar variables are implicitly declared.
-Numeric variables begin as integer zero and hold an `int32` or a finite
-`float64`. Floats are enabled by default. String variables begin as `""`.
-Arrays and parameters use the same suffix rule. `name` and `name$` are
-distinct variables.
+Numeric variables begin as integer zero and hold an `int32` or Fixxy's
+Q16.16 `Fixed`. Fixed-point values are enabled by default. String variables
+begin as `""`. Arrays and parameters use the same suffix rule. `name` and
+`name$` are distinct variables.
 
 Integer literals retain their int32 range. Decimal points or exponents make
-floating-point literals, such as `1.5`, `.25`, `2.`, `1e-3`, or `2.5D+2`.
-Both `E` and `D` select float64. A float literal is limited to 128 bytes and
-an exponent magnitude of 512. Non-finite literals are rejected. Very small
-values can underflow to zero.
+fixed-point literals, such as `1.5`, `.25`, `2.`, `1e-3`, or `2.5D+2`.
+Both `E` and `D` select fixed-point numbers. A literal is limited to 128 bytes
+and an exponent magnitude of 512. Exponents are expanded using integer
+arithmetic and parsed by Fixxy. Out-of-range literals raise `BasicError`.
+Very small values round to zero.
+
+`Fixed` ranges from -32768 to 32767.9999847412109375, with a resolution of
+1/65536. Arithmetic and decimal parsing use the same rules as
+[Fixxy](https://github.com/treeform/fixxy). Multiplication and division round
+to nearest with ties toward positive infinity. Decimal input uses Fixxy's
+parser, which retains up to nine fractional decimal digits before rounding
+its magnitude to the nearest step. Decimal values have no NaN, infinity,
+or distinct negative zero.
 
 Integer addition, subtraction, multiplication, and negation wrap in two's
-complement. If either operand is a float, arithmetic promotes to float64.
-`/` performs floating-point division, including `3 / 2 = 1.5`. Use `\` for
-integer division toward zero. `mod` computes an integer remainder. Both
-integer operators require exact int32 operands, accepting `3.0` and rejecting
-`3.5`. Division by zero and non-finite results raise `BasicError`. Integer
-division of the minimum int32 by -1 returns the minimum int32, and the
-corresponding remainder is zero.
+complement. If either operand is fixed-point, arithmetic converts the integer
+operand to `Fixed`. That conversion requires an integer from -32768 to
+32767 and raises `BasicError` outside this range. Comparisons instead widen
+to int64 and remain exact over both representations' full ranges.
 
-Floating-point arithmetic follows the host's float64 implementation and is
-not a cross-platform determinism guarantee. Integer arithmetic keeps its
-existing wrapping semantics, so `2147483647 + 1` wraps while
-`2147483647 + 1.0` produces the float `2147483648.0`.
+`/` performs fixed-point division, including `3 / 2 = 1.5`, and requires both
+operands to fit `Fixed`. Use `\` for integer division toward zero over the
+full int32 range. `mod` computes an integer remainder. Both integer operators
+require exact int32 operands, accepting `3.0` and rejecting `3.5`. Division
+by zero raises `BasicError`, including a divisor that rounded to zero.
+Integer division of the minimum int32 by -1 returns the minimum int32, and
+the corresponding remainder is zero.
 
-### Disabling floating-point execution
+Fixed-point results wrap according to Fixxy, so `32767.0 + 1.0` becomes
+`-32768.0`. Builds with `-d:fixedChecks` report checked intermediate overflow
+as `BasicError`. Negating the minimum fixed-point value still returns itself.
+The same program, build options, host inputs, and deterministic callbacks
+produce the same numeric results across supported native platforms. The
+compiler, constant folding, interpreter, and numeric formatting do not use
+floating-point operations.
 
-Set `limits.disableFloats = true` before compiling deterministic scripts:
+### Integer-only execution
+
+Set `limits.disableFixed = true` before compiling integer-only scripts:
 
 ```nim
 var limits = defaultLimits()
-limits.disableFloats = true
+limits.disableFixed = true
 let program = compile("answer = 3 / 2", limits)
 var runtime = initRuntime(program, limits)
 discard runtime.run
 doAssert runtime.getGlobal("answer") == 1
 ```
 
-In this mode, float literals are rejected and `/` uses the original integer
-division semantics. Globals, arrays, host data, and callback results cannot
-receive float values, including whole-valued floats such as `1.0`. Integer
-arithmetic, comparisons, and VM control flow execute without floating-point
-operations.
+In this mode, decimal literals are rejected and `/` uses integer division.
+Globals, arrays, host data, and callback results cannot receive fixed-point
+values, including whole-valued numbers such as `1.0`.
 
 The restriction is stored in the compiled program and persists through
 `initRuntime`, `restart`, and `reset`. Creating a runtime with default limits
-does not enable floats for an integer-only program. To run a float-enabled
-program under integer-only limits, recompile it with `disableFloats`. Runtime
-creation rejects that mismatch because constant folding already used the
-selected division semantics. Trusted callbacks still need deterministic
-implementations and inputs.
+does not enable fixed-point values for an integer-only program. Recompile
+with `disableFixed` before requesting integer-only runtime limits, because
+constant folding already used the selected division semantics.
 
 ### Numeric values in Nim
 
-Existing `getGlobal`, `getArray`, and `getData` return exact int32 values.
-They raise `BasicError` for fractional or out-of-range floats. Use
-`getGlobalValue`, `getArrayValue`, and `getDataValue` to read either numeric
-kind, then inspect `.kind`, `.asFloat`, or `.asInt`. `.asFloat` widens int32
-exactly. `.asInt` requires an exact integer in the int32 range.
+`getGlobal`, `getArray`, and `getData` return exact int32 values and raise
+`BasicError` for fractional values. Use `getGlobalValue`, `getArrayValue`,
+and `getDataValue` to read either numeric kind, then inspect `.kind`,
+`.asFixed`, or `.asInt`. `.asFixed` checks integer promotion against the
+Q16.16 range. `.asInt` requires an exact integer.
 
-Setters and `addData` accept integers or floats through checked `toValue`
-converters. `NumericHostProc` accepts `openArray[Value]` and returns `Value`.
-Register it with `addFunction`, just like an existing `HostProc`. Integer
-callbacks remain available. All their arguments must convert exactly to
-int32 before the callback runs, which also protects string handles from
-silent truncation. A replacement host must match the compiled callback kind,
-argument count, and work cost.
+Setters and `addData` accept integers or `Fixed` through `toValue` converters.
+`bossy` exports Fixxy, so host code can use `0.25'fx`, `fixed(3)`, and
+`parseFixed("1.5")`. There is no implicit conversion from native floats to
+BASIC values. Any deliberate float conversion belongs in the host's input
+or output boundary, outside deterministic simulation code.
+
+`NumericHostProc` accepts `openArray[Value]` and returns `Value`. Register it
+with `addFunction`, just like an existing `HostProc`. Integer callbacks
+remain available. All their arguments must convert exactly to int32 before
+the callback runs, which also protects string handles from silent truncation.
+A replacement host must match the compiled callback kind, argument count,
+and work cost.
 
 Numeric cells occupy 16 logical bytes in both modes. Host callback slots
 occupy 32 bytes, and each argument scratch slot also reserves 4 bytes for
 integer callback conversion. These preallocated buffers count toward
-`maxMemoryBytes`. Arithmetic does not grow runtime storage. Compiled float
+`maxMemoryBytes`. Arithmetic does not grow runtime storage. Compiled fixed
 constants belong to the shared program, outside the runtime memory budget.
-The instruction, work, call-depth, and output limits apply in both modes.
-See [the numeric host example](../examples/floats.nim).
+Instruction, work, call-depth, and output limits apply in both modes.
+See [the numeric host example](../examples/fixed.nim).
+
+Migration from the former floating-point API:
+
+| Previous API | Fixed-point API |
+| --- | --- |
+| `FloatValue` | `FixedValue` |
+| `.asFloat` | `.asFixed` |
+| Native float inputs such as `0.25` | Fixxy inputs such as `0.25'fx` |
+| `FloatPrint` and `event.floatValue` | `FixedPrint` and `event.fixedValue` |
+| `limits.disableFloats` | `limits.disableFixed` |
 
 ### Booleans and bitwise operators
 
@@ -114,12 +142,12 @@ Parentheses override precedence. Binary logical operators evaluate both
 operands, including host function calls. Use nested `if` statements when
 evaluating the right operand would be unsafe or perform an unwanted action.
 
-Float operands of logical operators are rounded to the nearest integer,
+Fixed-point operands of logical operators are rounded to the nearest integer,
 with exact halves rounded to the even integer. For example, `1.5 and -1`
 is 2, `2.5 and -1` is 2, and `0.5 and -1` is 0. Operands outside the int32
 range raise `BasicError`. Rounding applies only to logical operators.
 Array indices, string handles, integer division, and integer host callbacks
-continue to require exact int32 values. When floats are disabled, logical
+continue to require exact int32 values. When fixed-point values are disabled, logical
 operations use only integers.
 
 In Nim, `toValue(true)` produces integer -1 and `toValue(false)` produces
@@ -238,7 +266,7 @@ may be globals or `sub` parameters. `exit for` leaves the nearest enclosing
 `for`, even when another kind of loop is nested inside it.
 
 Counters use the VM's numeric arithmetic and accept fractional steps. A zero
-step, integer wraparound, or a float step too small to change the counter can
+step, integer wraparound, or a fixed-point step rounded to zero can
 keep a loop running until an execution budget stops it. Choose bounds and
 increments that let the counter reach the end of the range.
 
@@ -339,14 +367,12 @@ in expressions. String-returning host functions require a `$` suffix.
 
 ## Output and literals
 
-`print` emits text, integer, float, and newline events to the host's callback.
-A `FloatPrint` event provides `floatValue` and its formatted `text`. Write
-`text` to preserve the exact byte count charged to the output budget. Integer
-output continues to use `ValuePrint` and `event.value`. Float formatting uses
-a bounded temporary string, including when the output callback is omitted.
-A comma inserts one space. A semicolon concatenates items, and a trailing
-semicolon suppresses the newline. Double a quote inside a quoted literal
-to include a quote character.
+`print` emits text, integer, fixed-point, and newline events to the host's
+callback. A `FixedPrint` event provides `fixedValue` and its formatted `text`.
+Write that text to preserve the VM's output accounting. Integer output uses
+`ValuePrint` and `event.value`. Fixxy formats decimals with five fractional
+digits using integer arithmetic, so `print 1.25` writes `1.25000`. `str$`
+uses the same numeric format and its existing leading-space convention.
 
 Quoted literals are string expressions and can appear in assignments,
 comparisons, calls, and output. String output uses `TextPrint`. A literal
@@ -395,11 +421,11 @@ Positions are one-based and must be positive. Lengths must be nonnegative.
 Substring lengths clamp to the available bytes, and a start past the end
 produces an empty substring or an unsuccessful search. An empty INSTR needle
 matches at the start position if it is within the input string. Integer
-arguments require exact int32 values, including when floats are enabled.
+arguments require exact int32 values, including when fixed-point values are enabled.
 Strings hold bytes, including NUL and UTF-8, but indexing and case conversion
 are not Unicode character operations. Numeric formatting uses the VM's
 existing decimal formatter rather than reproducing every QBasic format.
-Native strings also work with `disableFloats = true`.
+Native strings also work with `disableFixed = true`.
 
 ### String limits and lifetime
 

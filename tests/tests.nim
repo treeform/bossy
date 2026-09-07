@@ -1,7 +1,7 @@
 import
   std/strutils,
-  basic,
-  test_controls, test_floats, test_booleans, test_strings
+  bossy,
+  test_controls, test_fixed, test_booleans, test_strings, test_determinism
 
 proc errorContains(
     action: proc() {.closure.},
@@ -138,7 +138,7 @@ print "done";
     output = ""
   let logger: PrintProc = proc(event: PrintEvent) =
     case event.kind
-    of TextPrint, FloatPrint:
+    of TextPrint, FixedPrint:
       output.add event.text
     of ValuePrint:
       output.add $event.value

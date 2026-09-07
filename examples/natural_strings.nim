@@ -1,4 +1,4 @@
-import basic
+import bossy
 
 var
   host = initHost()
@@ -12,7 +12,7 @@ proc acknowledge(arguments: openArray[Value]): Value =
 proc log(event: PrintEvent) =
   ## Writes the string example's output events.
   case event.kind
-  of TextPrint, FloatPrint:
+  of TextPrint, FixedPrint:
     stdout.write event.text
   of ValuePrint:
     stdout.write event.value

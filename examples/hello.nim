@@ -1,9 +1,9 @@
-import basic
+import bossy
 
 proc print(event: PrintEvent) =
   ## Writes BASIC output events to the terminal.
   case event.kind
-  of TextPrint, FloatPrint:
+  of TextPrint, FixedPrint:
     stdout.write event.text
   of ValuePrint:
     stdout.write event.value

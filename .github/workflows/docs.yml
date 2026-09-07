@@ -10,19 +10,30 @@ permissions:
 
 env:
   deploy-dir: .gh-pages
-  nim-src: src/basic.nim
+  nim-src: src/bossy.nim
 
 jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Check out private Fixxy dependency
+        uses: actions/checkout@v5
+        with:
+          repository: treeform/fixxy
+          ref: e35b9b9f7bab725886ca1df1a0e35256cde9f93d
+          path: .dependencies/fixxy
+          ssh-key: ${{ secrets.FIXXY_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: treeform/setup-nim-action@v6
       - name: Install dependencies
         shell: bash
         run: |
+          mkdir -p "$HOME/.nimby/pkgs"
+          cp -R .dependencies/fixxy "$HOME/.nimby/pkgs/fixxy"
           cd ..
           nimby install -g "${{ github.event.repository.name }}/${{ github.event.repository.name }}.nimble"
+          nimby sync -g "${{ github.event.repository.name }}/nimby.lock"
       - name: Build documentation
         run: nim doc --index:on --project --git.url:https://github.com/${{ github.repository }} --git.commit:master --out:${{ env.deploy-dir }} ${{ env.nim-src }}
       - name: Keep documentation available for private review

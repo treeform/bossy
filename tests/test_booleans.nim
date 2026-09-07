@@ -1,11 +1,11 @@
 import
   std/strutils,
-  basic
+  bossy
 
-proc execute(source: string, disableFloats = false): Runtime =
+proc execute(source: string, disableFixed = false): Runtime =
   ## Runs a Boolean example with the requested numeric policy.
   var limits = defaultLimits()
-  limits.disableFloats = disableFloats
+  limits.disableFixed = disableFixed
   result = initRuntime(compile(source, limits), limits)
   discard result.run
 
@@ -20,7 +20,7 @@ echo "Testing BASIC Boolean constants, comparisons, and bit patterns"
 block:
   for disabled in [false, true]:
     var limits = defaultLimits()
-    limits.disableFloats = disabled
+    limits.disableFixed = disabled
     for (expression, expected) in [
       ("true", -1), ("false", 0), ("not false", -1), ("not true", 0),
       ("2 = 2", -1), ("2 <> 2", 0), ("2 < 3", -1), ("2 <= 2", -1),
@@ -64,7 +64,7 @@ block:
   const Operators = ["and", "or", "xor", "eqv", "imp"]
   for disabled in [false, true]:
     var limits = defaultLimits()
-    limits.disableFloats = disabled
+    limits.disableFixed = disabled
     for (left, right, expected) in [
       (-1, -1, [-1, -1, 0, -1, -1]),
       (-1, 0, [0, -1, -1, 0, 0]),
@@ -126,15 +126,15 @@ loop until 2
     doAssert runtime.getGlobal("skipped") == 0
     doAssert runtime.getGlobal("once") == 1
 
-echo "Testing float logical operands round ties to even"
+echo "Testing fixed-point logical operands round ties to even"
 block:
   for (value, rounded) in [
-    (0.0, 0), (-0.0, 0), (0.49, 0), (0.5, 0), (0.51, 1),
-    (1.5, 2), (2.5, 2), (3.5, 4), (4.5, 4),
-    (-0.49, 0), (-0.5, 0), (-0.51, -1), (-1.5, -2), (-2.5, -2),
-    (-3.5, -4), (-4.5, -4), (2147483646.5, 2147483646),
-    (2147483647.0, 2147483647), (-2147483647.5, -2147483648),
-    (-2147483648.0, -2147483648)
+    (0.0'fx, 0), (-0.0'fx, 0), (0.49'fx, 0), (0.5'fx, 0), (0.51'fx, 1),
+    (1.5'fx, 2), (2.5'fx, 2), (3.5'fx, 4), (4.5'fx, 4),
+    (-0.49'fx, 0), (-0.5'fx, 0), (-0.51'fx, -1), (-1.5'fx, -2), (-2.5'fx, -2),
+    (-3.5'fx, -4), (-4.5'fx, -4), (32766.5'fx, 32766),
+    (32767.0'fx, 32767), (-32767.5'fx, -32768),
+    (-32768.0'fx, -32768)
   ]:
     let source =
       "folded = (" & $value & ") and -1\n" &
@@ -148,7 +148,7 @@ block:
     doAssert runtime.getGlobal("executed") == rounded, $value
     doAssert runtime.getGlobal("inverse") == not int32(rounded), $value
     let answer =
-      if value != 0.0:
+      if value != 0.0'fx:
         -1
       else:
         0
@@ -163,11 +163,11 @@ block:
         executed = "value = " & value & "\nanswer = " & expression
       doAssert errorContains(
         proc() = discard execute(folded),
-        "logical operand exceeds int32"
+        "range"
       )
       doAssert errorContains(
         proc() = discard execute(executed),
-        "logical operand exceeds int32"
+        "range"
       )
 
 echo "Testing Boolean host values, callbacks, strings, and eager evaluation"
@@ -177,7 +177,7 @@ block:
       limits = defaultLimits()
       host = initHost()
       calls: seq[int32]
-    limits.disableFloats = disabled
+    limits.disableFixed = disabled
     let
       predicate: NumericHostProc = proc(args: openArray[Value]): Value =
         ## Returns a Nim Boolean through the BASIC value converter.
@@ -221,10 +221,10 @@ compare = strCmp(strNew("z"), strNew("a"))
     doAssert not runtime.getGlobalValue("hostValue").asBool
     runtime.setData("enabled", false)
     doAssert runtime.getData("enabled") == 0
-  for value in [toValue(-1), toValue(1), toValue(2), toValue(0.5)]:
+  for value in [toValue(-1), toValue(1), toValue(2), toValue(0.5'fx)]:
     doAssert value.asBool
   doAssert not toValue(0).asBool
-  doAssert not toValue(0.0).asBool
+  doAssert not toValue(0.0'fx).asBool
   doAssert toValue(true).asInt == -1
   doAssert toValue(false).asInt == 0
 
@@ -246,7 +246,7 @@ block:
   var short = initRuntime(program, limits)
   doAssert errorContains(proc() = discard short.run, "print byte limit")
   limits = defaultLimits()
-  limits.disableFloats = true
+  limits.disableFixed = true
   limits.maxWorkUnits = 100
   var looped = initRuntime(compile("while not false\nwend", limits), limits)
   doAssert errorContains(proc() = discard looped.run, "work limit")

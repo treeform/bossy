@@ -6,22 +6,22 @@ proc advance(arguments: openArray[Value]): Value =
 
 block:
   var host = initHost()
-  discard host.addData("delta", 0.25)
+  discard host.addData("delta", 0.25'fx)
   discard host.addFunction("advance", 3, advance, workUnits = 4)
   let program = compile("""
 x = advance(x, 1.5, delta)
 """, host)
   var runtime = initRuntime(program, host)
   discard runtime.run
-  doAssert runtime.getGlobalValue("x").asFloat == 0.375
+  doAssert runtime.getGlobalValue("x").asFixed == 0.375'fx
   echo "Coordinate: ", runtime.getGlobalValue("x")
   runtime.restart
   discard runtime.run
-  doAssert runtime.getGlobalValue("x").asFloat == 0.75
+  doAssert runtime.getGlobalValue("x").asFixed == 0.75'fx
 
 block:
   var limits = defaultLimits()
-  limits.disableFloats = true
+  limits.disableFixed = true
   let program = compile("coordinate = 3 / 2", limits)
   var runtime = initRuntime(program, limits)
   discard runtime.run

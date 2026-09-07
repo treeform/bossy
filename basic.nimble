@@ -6,3 +6,4 @@ license     = "MIT"
 srcDir = "src"
 
 requires "nim >= 2.2.10"
+requires "https://github.com/treeform/fixxy"

@@ -14,11 +14,12 @@ and actions each script is allowed to use. Configurable execution and memory
 limits keep script workloads bounded.
 
 Compile a script once and create independent runtimes for players or bots.
-The library uses only Nim's standard library and requires Nim 2.2.10 or newer.
+The library uses [Fixxy](https://github.com/treeform/fixxy) for deterministic
+Q16.16 arithmetic and requires Nim 2.2.10 or newer.
 
 ## About
 
-Scripts support int32 arithmetic, arrays, structured control flow,
+Scripts support int32 and fixed-point arithmetic, arrays, structured control flow,
 subroutines, native callbacks, bounded output, and optional strings
 represented by integer handles.
 
@@ -49,8 +50,8 @@ git clone git@github.com:treeform/basic.git
 nimby install basic/basic.nimble
 ```
 
-The library has no external runtime dependencies. The optional benchmarks
-use `benchy`.
+Installation also requires access to the private `treeform/fixxy` dependency.
+The optional benchmarks use `benchy`.
 
 ## Quick start
 
@@ -170,6 +171,7 @@ reading them. String operations address bytes, and case conversion is ASCII.
 
 - [BASIC language reference](docs/language.md).
 - [Host callbacks and persistent execution](examples/hosts.nim).
+- [Fixed-point values and numeric callbacks](examples/fixed.nim).
 - [String pool example](examples/strings.nim).
 
 Build the API reference locally:
@@ -190,6 +192,7 @@ From the repository root:
 nim check src/basic.nim
 nim r tests/tests.nim
 nim r -d:release tests/tests.nim
+nim r -d:fixedChecks tests/tests.nim
 nim r examples/hello.nim
 nim r examples/hosts.nim
 nim r examples/strings.nim

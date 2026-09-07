@@ -1,11 +1,13 @@
-import std/math
+import fixxy
+
+export fixxy
 
 type
   BasicError* = object of CatchableError
 
   ValueKind* = enum
     IntegerValue,
-    FloatValue,
+    FixedValue,
     StringValue
 
   Value* = object
@@ -13,8 +15,8 @@ type
     case kind: ValueKind
     of IntegerValue:
       integer: int32
-    of FloatValue:
-      decimal: float64
+    of FixedValue:
+      decimal: Fixed
     of StringValue:
       reference: uint64
 
@@ -52,18 +54,21 @@ converter toValue*(value: int): Value {.inline, raises: [BasicError].} =
     raise newException(BasicError, "BASIC integer is outside the int32 range")
   toValue(int32(value))
 
-converter toValue*(value: float64): Value {.inline, raises: [BasicError].} =
-  ## Wraps a finite float, rejecting NaN and infinity.
-  if classify(value) in {fcNan, fcInf, fcNegInf}:
-    raise newException(BasicError, "BASIC floating-point value must be finite")
-  Value(kind: FloatValue, decimal: value)
+converter toValue*(value: Fixed): Value {.inline, raises: [].} =
+  ## Wraps a Q16.16 number without changing its stored bits.
+  Value(kind: FixedValue, decimal: value)
 
-proc asFloat*(value: Value): float64 {.inline, raises: [BasicError].} =
-  ## Reads a float or widens an integer exactly to float64.
+proc asFixed*(value: Value): Fixed {.inline, raises: [BasicError].} =
+  ## Reads fixed-point data or converts an integer within the Q16.16 range.
   case value.kind
   of IntegerValue:
-    float64(value.integer)
-  of FloatValue:
+    if value.integer < -32768 or value.integer > 32767:
+      raise newException(
+        BasicError,
+        "BASIC integer is outside the fixed-point range"
+      )
+    fixed(value.integer)
+  of FixedValue:
     value.decimal
   of StringValue:
     raise newException(BasicError, "BASIC value must be numeric")
@@ -73,22 +78,20 @@ proc asBool*(value: Value): bool {.inline, raises: [BasicError].} =
   case value.kind
   of IntegerValue:
     value.integer != 0
-  of FloatValue:
-    value.decimal != 0.0
+  of FixedValue:
+    value.decimal != FixedZero
   of StringValue:
     raise newException(BasicError, "BASIC value must be numeric")
 
 proc asInt*(value: Value): int32 {.inline, raises: [BasicError].} =
-  ## Reads an integer, rejecting fractional or out-of-range floats.
+  ## Reads an integer, rejecting fractional fixed-point values.
   case value.kind
   of IntegerValue:
     value.integer
-  of FloatValue:
-    if value.decimal < float64(low(int32)) or
-      value.decimal > float64(high(int32)) or
-      trunc(value.decimal) != value.decimal:
-        raise newException(BasicError, "BASIC value must be an exact int32")
-    int32(value.decimal)
+  of FixedValue:
+    if value.decimal.fraction != 0:
+      raise newException(BasicError, "BASIC value must be an exact int32")
+    value.decimal.toInt
   of StringValue:
     raise newException(BasicError, "BASIC value must be numeric")
 
@@ -97,47 +100,55 @@ proc `$`*(value: Value): string {.raises: [BasicError].} =
   case value.kind
   of IntegerValue:
     $value.integer
-  of FloatValue:
+  of FixedValue:
     $value.decimal
   of StringValue:
     raise newException(BasicError, "BASIC value must be numeric")
 
+template fixedResult(expression: untyped): Value =
+  ## Maps optional Fixxy overflow assertions to catchable script errors.
+  try:
+    toValue(expression)
+  except AssertionDefect as error:
+    raise newException(BasicError, error.msg)
+
 proc `+`*(left, right: Value): Value {.inline, raises: [BasicError].} =
-  ## Adds integers with wrapping or promotes mixed operands to float64.
+  ## Adds integers with wrapping or promotes mixed operands to Fixed.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     toValue(left.integer +% right.integer)
   else:
-    toValue(left.asFloat + right.asFloat)
+    fixedResult(left.asFixed + right.asFixed)
 
 proc `-`*(left, right: Value): Value {.inline, raises: [BasicError].} =
-  ## Subtracts integers with wrapping or promotes operands to float64.
+  ## Subtracts integers with wrapping or promotes operands to Fixed.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     toValue(left.integer -% right.integer)
   else:
-    toValue(left.asFloat - right.asFloat)
+    fixedResult(left.asFixed - right.asFixed)
 
 proc `*`*(left, right: Value): Value {.inline, raises: [BasicError].} =
-  ## Multiplies integers with wrapping or promotes operands to float64.
+  ## Multiplies integers with wrapping or promotes operands to Fixed.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     toValue(left.integer *% right.integer)
   else:
-    toValue(left.asFloat * right.asFloat)
+    fixedResult(left.asFixed * right.asFixed)
 
 proc `-`*(value: Value): Value {.inline, raises: [BasicError].} =
-  ## Negates a float or wraps an integer's two's-complement negation.
+  ## Negates a fixed-point value or integer with defined wrapping.
   case value.kind
   of IntegerValue:
     toValue(0'i32 -% value.integer)
-  of FloatValue:
+  of FixedValue:
     toValue(-value.decimal)
   of StringValue:
     raise newException(BasicError, "BASIC value must be numeric")
 
 proc `/`*(left, right: Value): Value {.inline, raises: [BasicError].} =
-  ## Divides as float64 and rejects zero divisors and non-finite results.
-  if right.asFloat == 0.0:
+  ## Divides as Q16.16 with Fixxy rounding and rejects zero divisors.
+  let divisor = right.asFixed
+  if divisor == FixedZero:
     raise newException(BasicError, "division by zero")
-  toValue(left.asFloat / right.asFloat)
+  fixedResult(left.asFixed / divisor)
 
 proc `div`*(left, right: Value): Value {.inline, raises: [BasicError].} =
   ## Divides exact int32 operands toward zero with defined overflow.
@@ -166,16 +177,12 @@ proc bitInteger(value: Value): int32 {.inline, raises: [BasicError].} =
   case value.kind
   of IntegerValue:
     result = value.integer
-  of FloatValue:
-    if value.decimal < float64(low(int32)) or
-      value.decimal > float64(high(int32)):
-        raise newException(BasicError, "BASIC logical operand exceeds int32")
-    let
-      lower = floor(value.decimal)
-      fraction = value.decimal - lower
-    result = int32(lower)
-    if fraction > 0.5 or (fraction == 0.5 and (result and 1) != 0):
-      inc result
+  of FixedValue:
+    let fraction = value.decimal.fraction
+    result = value.decimal.whole
+    if fraction > 32768'u16 or
+      (fraction == 32768'u16 and (result and 1) != 0):
+        inc result
   of StringValue:
     raise newException(BasicError, "BASIC value must be numeric")
 
@@ -203,23 +210,33 @@ proc imp*(left, right: Value): Value {.inline, raises: [BasicError].} =
   ## Computes bitwise implication between two rounded int32 operands.
   toValue((not left.bitInteger) or right.bitInteger)
 
+proc scaled(value: Value): int64 {.inline, raises: [BasicError].} =
+  ## Widens either numeric representation without losing integer range.
+  case value.kind
+  of IntegerValue:
+    int64(value.integer) * FixedScale
+  of FixedValue:
+    int64(int32(value.decimal))
+  of StringValue:
+    raise newException(BasicError, "BASIC value must be numeric")
+
 proc `==`*(left, right: Value): bool {.inline, raises: [BasicError].} =
-  ## Compares numeric values, widening only when a float is present.
+  ## Compares numbers exactly across the full int32 and Q16.16 ranges.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     left.integer == right.integer
   else:
-    left.asFloat == right.asFloat
+    left.scaled == right.scaled
 
 proc `<`*(left, right: Value): bool {.inline, raises: [BasicError].} =
-  ## Orders numeric values, widening only when a float is present.
+  ## Orders numbers exactly across the full int32 and Q16.16 ranges.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     left.integer < right.integer
   else:
-    left.asFloat < right.asFloat
+    left.scaled < right.scaled
 
 proc `<=`*(left, right: Value): bool {.inline, raises: [BasicError].} =
   ## Compares numeric values inclusively without changing their types.
   if left.kind == IntegerValue and right.kind == IntegerValue:
     left.integer <= right.integer
   else:
-    left.asFloat <= right.asFloat
+    left.scaled <= right.scaled

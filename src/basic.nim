@@ -31,8 +31,8 @@ const
   DefaultMaxWorkUnits* = 10_000_000'i64
   DefaultMaxPrintBytes* = 1'i64 * 1024 * 1024
   DefaultMaxPrintEvents* = 100_000'i64
-  MaximumFloatLiteralBytes* = 128
-  MaximumFloatExponent* = 512
+  MaximumFixedLiteralBytes* = 128
+  MaximumFixedExponent* = 512
   LogicalFrameBytes = 16'i64
   LogicalHostCallbackBytes = 32'i64
   LogicalValueBytes = 16'i64
@@ -44,7 +44,7 @@ type
     maxStrings*: int
     maxStringBytes*: int
     maxStringLength*: int
-    disableFloats*: bool
+    disableFixed*: bool
     maxSourceBytes*: int
     maxCodeInstructions*: int
     maxArrays*: int
@@ -66,14 +66,14 @@ type
   PrintKind* = enum
     TextPrint,
     ValuePrint,
-    FloatPrint,
+    FixedPrint,
     NewlinePrint
 
   PrintEvent* = object
     kind*: PrintKind
     text*: string
     value*: int32
-    floatValue*: float64
+    fixedValue*: Fixed
 
   PrintProc* = proc(event: PrintEvent) {.closure.}
 
@@ -109,7 +109,7 @@ type
   TokenKind = enum
     IdentifierToken,
     IntegerToken,
-    FloatToken,
+    FixedToken,
     StringToken,
     LabelToken,
     NewlineToken,
@@ -140,7 +140,7 @@ type
   Op = enum
     MeterOp,
     LoadImmediateOp,
-    LoadFloatOp,
+    LoadFixedOp,
     LoadStringOp,
     TextCallOp,
     MoveOp,
@@ -232,8 +232,8 @@ type
   Program* = ref object
     ## A ref so sharing a program copies the handle, not the bytecode.
     usesStrings: bool
-    disableFloats: bool
-    floats: seq[float64]
+    disableFixed: bool
+    fixedValues: seq[Fixed]
     code: seq[Instruction]
     arrays: seq[BasicArray]
     routines: seq[Routine]
@@ -577,20 +577,20 @@ proc lex(source: string, limits: Limits): seq[Token] =
         startColumn = column
       var
         digits = 0
-        floating = false
+        fixedPoint = false
       while pos < source.len and source[pos] in {'0' .. '9'}:
         inc pos
         inc digits
       if pos < source.len and source[pos] == '.':
-        floating = true
+        fixedPoint = true
         inc pos
         while pos < source.len and source[pos] in {'0' .. '9'}:
           inc pos
           inc digits
       if digits == 0:
-        fail(sourceToken(FloatToken, line, startColumn), "expected digits")
+        fail(sourceToken(FixedToken, line, startColumn), "expected digits")
       if pos < source.len and source[pos] in {'e', 'E', 'd', 'D'}:
-        floating = true
+        fixedPoint = true
         inc pos
         if pos < source.len and source[pos] in {'+', '-'}:
           inc pos
@@ -598,31 +598,31 @@ proc lex(source: string, limits: Limits): seq[Token] =
         var exponent = 0
         while pos < source.len and source[pos] in {'0' .. '9'}:
           exponent = exponent * 10 + ord(source[pos]) - ord('0')
-          if exponent > MaximumFloatExponent:
+          if exponent > MaximumFixedExponent:
             fail(
-              sourceToken(FloatToken, line, startColumn),
-              "floating-point exponent exceeds the supported range"
+              sourceToken(FixedToken, line, startColumn),
+              "fixed-point exponent exceeds the supported range"
             )
           inc pos
         if pos == exponentStart:
           fail(
-            sourceToken(FloatToken, line, startColumn),
+            sourceToken(FixedToken, line, startColumn),
             "expected exponent digits"
           )
       column += pos - start
       let text = source[start ..< pos]
-      if floating:
-        if text.len > MaximumFloatLiteralBytes:
+      if fixedPoint:
+        if text.len > MaximumFixedLiteralBytes:
           fail(
-            sourceToken(FloatToken, line, startColumn),
-            "floating-point literal exceeds the byte limit"
+            sourceToken(FixedToken, line, startColumn),
+            "fixed-point literal exceeds the byte limit"
           )
-        if limits.disableFloats:
+        if limits.disableFixed:
           fail(
-            sourceToken(FloatToken, line, startColumn),
-            "BASIC floating-point values are disabled"
+            sourceToken(FixedToken, line, startColumn),
+            "BASIC fixed-point values are disabled"
           )
-        result.add sourceToken(FloatToken, line, startColumn, text)
+        result.add sourceToken(FixedToken, line, startColumn, text)
       else:
         var value = 0'i64
         for digit in text:
@@ -1167,10 +1167,10 @@ proc materialize(parser: var Parser, value: var Expr) =
     value.reg = parser.allocateTemp
     value.temporary = true
     value.constant = false
-    if value.value.kind == FloatValue:
-      let id = int32(parser.compiler[].program.floats.len)
-      parser.compiler[].program.floats.add value.value.asFloat
-      discard parser.emit(LoadFloatOp, value.reg, id)
+    if value.value.kind == FixedValue:
+      let id = int32(parser.compiler[].program.fixedValues.len)
+      parser.compiler[].program.fixedValues.add value.value.asFixed
+      discard parser.emit(LoadFixedOp, value.reg, id)
     else:
       discard parser.emit(LoadImmediateOp, value.reg, value.value.asInt)
 
@@ -1241,7 +1241,7 @@ proc binaryResult(
     }):
       fail(parser.current, "BASIC expression type mismatch")
   let op =
-    if op == DivideOp and parser.compiler[].limits.disableFloats:
+    if op == DivideOp and parser.compiler[].limits.disableFixed:
       IntegerDivideOp
     else:
       op
@@ -1305,6 +1305,37 @@ proc parseHostCall(
 proc parseTextCall(parser: var Parser, name: Token): Expr
   ## Parses a built-in string operation with checked argument types.
 
+proc fixedLiteral(token: Token, negative = false): Value =
+  ## Expands bounded decimal exponents before Fixxy's integer-only parser.
+  let
+    text = token.text.toLowerAscii.replace('d', 'e')
+    exponentAt = text.find('e')
+    mantissa =
+      if exponentAt < 0:
+        text
+      else:
+        text[0 ..< exponentAt]
+    exponent =
+      if exponentAt < 0:
+        0
+      else:
+        parseInt(text[exponentAt + 1 .. ^1])
+    point = mantissa.find('.')
+    digits = mantissa.replace(".", "")
+    decimalAt =
+      (if point < 0: mantissa.len else: point) + exponent
+    expanded =
+      if decimalAt <= 0:
+        "0." & "0".repeat(-decimalAt) & digits
+      elif decimalAt >= digits.len:
+        digits & "0".repeat(decimalAt - digits.len)
+      else:
+        digits[0 ..< decimalAt] & "." & digits[decimalAt .. ^1]
+  try:
+    return toValue(parseFixed((if negative: "-" else: "") & expanded))
+  except FixxyError as error:
+    fail(token, error.msg)
+
 proc parsePrimary(parser: var Parser): Expr =
   ## Parses a literal, scalar, array access, or parenthesized expression.
   let token = parser.advance
@@ -1320,14 +1351,8 @@ proc parsePrimary(parser: var Parser): Expr =
       destination = parser.allocateTemp
     discard parser.emit(LoadStringOp, destination, id)
     result = Expr(reg: destination, temporary: true, text: true)
-  of FloatToken:
-    try:
-      let value = parseFloat(token.text.replace('d', 'e').replace('D', 'E'))
-      result = constant(toValue(value))
-    except ValueError:
-      fail(token, "invalid floating-point literal")
-    except BasicError as error:
-      fail(token, error.msg)
+  of FixedToken:
+    result = constant(fixedLiteral(token))
   of LeftParenToken:
     parser.enterSyntax
     result = parser.parseExpression
@@ -1413,6 +1438,8 @@ proc parseUnary(parser: var Parser): Expr =
     return
   if parser.current.kind == MinusToken:
     discard parser.advance
+    if parser.current.kind == FixedToken:
+      return constant(fixedLiteral(parser.advance, negative = true))
     if parser.current.kind == IntegerToken and
         parser.current.value == 2_147_483_648'i64:
       inc parser.pos
@@ -1809,7 +1836,7 @@ proc parseArguments(
           constant(parser.compiler[].literalId(parser.advance.text))
         else:
           parser.parseExpression
-      if value.constant and value.value.kind == FloatValue:
+      if value.constant and value.value.kind == FixedValue:
         parser.materialize(value)
       result.add CallArgument(
         value: value,
@@ -1865,7 +1892,7 @@ proc parseTextCall(parser: var Parser, name: Token): Expr =
       fail(name, "too many string function arguments")
     let start = parser.code.len
     var value = parser.parseExpression
-    if value.constant and value.value.kind == FloatValue:
+    if value.constant and value.value.kind == FixedValue:
       parser.materialize(value)
     arguments.add CallArgument(
       value: value, start: start, stop: parser.code.len
@@ -2784,11 +2811,11 @@ proc verify(program: Program) =
           item.b > ord(high(TextFunction)) or item.c < 1 or
           item.c > 3 or item.c > program.maxParameters:
             fail("compiler produced an invalid string function call")
-      of LoadFloatOp:
+      of LoadFixedOp:
         requireRegister(item.a)
-        if program.disableFloats or item.b < 0 or
-          int(item.b) >= program.floats.len:
-            fail("compiler produced an invalid floating-point constant")
+        if program.disableFixed or item.b < 0 or
+          int(item.b) >= program.fixedValues.len:
+            fail("compiler produced an invalid fixed-point constant")
       of LoadImmediateOp:
         requireRegister(item.a)
       of MoveOp, NegateOp, NotOp:
@@ -2824,8 +2851,8 @@ proc verify(program: Program) =
       of AddOp, SubtractOp, MultiplyOp, DivideOp, IntegerDivideOp,
           ModuloOp, EqualOp, NotEqualOp, LessOp, LessEqualOp,
           GreaterOp, GreaterEqualOp, AndOp, OrOp, XorOp, EqvOp, ImpOp:
-        if program.disableFloats and item.op == DivideOp:
-          fail("compiler emitted floating-point division while disabled")
+        if program.disableFixed and item.op == DivideOp:
+          fail("compiler emitted fixed-point division while disabled")
         requireRegister(item.a)
         requireRegister(item.b)
         requireRegister(item.c)
@@ -2903,8 +2930,8 @@ proc configureHost(
   for i, name in host.dataNames:
     if name.stringName:
       program.usesStrings = true
-    if limits.disableFloats and host.dataValues[i].kind == FloatValue:
-      fail("BASIC floating-point host data is disabled")
+    if limits.disableFixed and host.dataValues[i].kind == FixedValue:
+      fail("BASIC fixed-point host data is disabled")
     program.hostDataIds[name] = int32(i)
     program.hostDataNames.add name
   for i, function in host.functions:
@@ -2934,7 +2961,7 @@ proc compileProgram(
   var compiler = Compiler(
     limits: limits,
     tokens: prepareTokens(lex(source, limits)),
-    program: Program(disableFloats: limits.disableFloats),
+    program: Program(disableFixed: limits.disableFixed),
     literalIds: initOrderedTable[string, int32](),
     subEnds: initOrderedTable[int, int]()
   )
@@ -2981,8 +3008,8 @@ proc initRuntimeState(
 ): Runtime =
   ## Allocates bounded runtime state and binds its trusted host callbacks.
   limits.validate
-  if limits.disableFloats and not program.disableFloats:
-    fail("compile BASIC with disableFloats before integer-only execution")
+  if limits.disableFixed and not program.disableFixed:
+    fail("compile BASIC with disableFixed before integer-only execution")
   if program.code.len == 0:
     fail("cannot execute an empty or uncompiled BASIC program")
   if program.code.len > limits.maxCodeInstructions or
@@ -2997,9 +3024,9 @@ proc initRuntimeState(
     fail("compiled BASIC program exceeds the configured structural limits")
   for name in program.hostDataNames:
     let id = host.dataIds.getOrDefault(name, -1'i32)
-    if id >= 0 and program.disableFloats and
-      host.dataValues[int(id)].kind == FloatValue:
-        fail("BASIC floating-point host data is disabled")
+    if id >= 0 and program.disableFixed and
+      host.dataValues[int(id)].kind == FixedValue:
+        fail("BASIC fixed-point host data is disabled")
     if id < 0:
       fail("missing BASIC host data binding '" & name & "'")
   for function in program.hostFunctions:
@@ -3215,8 +3242,8 @@ proc requireValue(runtime: Runtime, value: Value) =
   ## Enforces the compiled numeric policy at every host entry point.
   if value.kind == StringValue:
     discard runtime.strings.length(value)
-  if runtime.program.disableFloats and value.kind == FloatValue:
-    fail("BASIC floating-point values are disabled")
+  if runtime.program.disableFixed and value.kind == FixedValue:
+    fail("BASIC fixed-point values are disabled")
 
 proc setData*(runtime: var Runtime, id: int32, value: Value) =
   ## Updates one host data slot by its compile-time binding index.
@@ -3554,8 +3581,8 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
     of TextCallOp:
       register(item.a) = runtime.textCall(TextFunction(item.b), int(item.c))
       inc runtime.pc
-    of LoadFloatOp:
-      register(item.a) = toValue(runtime.program.floats[int(item.b)])
+    of LoadFixedOp:
+      register(item.a) = toValue(runtime.program.fixedValues[int(item.b)])
       inc runtime.pc
     of LoadImmediateOp:
       register(item.a) = item.b
@@ -3840,12 +3867,12 @@ proc run*(runtime: var Runtime, print: PrintProc = nil): RunStats =
         runtime.chargePrint(length)
         if print != nil:
           print(PrintEvent(kind: TextPrint, text: runtime.strings.get(value)))
-      elif value.kind == FloatValue:
+      elif value.kind == FixedValue:
         let text = $value
         runtime.chargePrint(int64(text.len))
         if print != nil:
           print(PrintEvent(
-            kind: FloatPrint, floatValue: value.asFloat, text: text
+            kind: FixedPrint, fixedValue: value.asFixed, text: text
           ))
       else:
         runtime.chargePrint(printedIntegerBytes(value.asInt))

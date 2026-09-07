@@ -1,11 +1,11 @@
-## A BASIC compiler and metered register-machine interpreter.
+## Bossy compiles BASIC scripts to a metered, deterministic register VM.
 ## Scripts use numbers, bounded strings, arrays, and local jumps.
 ## Runtimes preallocate value storage and bind trusted native callbacks.
 ## Optional handle-based strings have separately bounded pools.
 
 import
   std/[strutils, tables],
-  basic/[numbers, texts]
+  bossy/[numbers, texts]
 
 export numbers
 

@@ -36,7 +36,7 @@ jobs:
           cd ..
           nimby install -g "${{ github.event.repository.name }}/${{ github.event.repository.name }}.nimble"
           nimby sync -g "${{ github.event.repository.name }}/nimby.lock"
-      - run: nim check src/basic.nim
+      - run: nim check src/bossy.nim
       - run: nim r tests/tests.nim
       - name: Test release execution
         run: nim r -d:release tests/tests.nim

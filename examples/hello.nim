@@ -1,4 +1,4 @@
-import basic
+import bossy
 
 proc print(event: PrintEvent) =
   ## Writes BASIC output events to the terminal.

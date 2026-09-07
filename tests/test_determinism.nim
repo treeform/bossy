@@ -1,6 +1,6 @@
 import
   std/[strutils, unittest],
-  basic
+  bossy
 
 const
   HashStart = 0xcbf29ce484222325'u64

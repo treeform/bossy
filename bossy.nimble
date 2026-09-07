@@ -1,6 +1,6 @@
 version     = "0.1.0"
 author      = "treeform"
-description = "A small, embeddable BASIC compiler and virtual machine."
+description = "A fast, safe, deterministic VM for games and untrusted scripts."
 license     = "MIT"
 
 srcDir = "src"

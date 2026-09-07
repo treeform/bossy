@@ -10,7 +10,7 @@ permissions:
 
 env:
   deploy-dir: .gh-pages
-  nim-src: src/basic.nim
+  nim-src: src/bossy.nim
 
 jobs:
   docs:

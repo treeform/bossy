@@ -18,6 +18,11 @@ workflows, examples, and documentation were new. Subsequent commits extend
 the standalone language and tests. The package keeps the minimum Nim version of
 2.2.10.
 
+The project was subsequently renamed from `basic` to `bossy`. The current
+entry module is `src/bossy.nim`, support modules live in `src/bossy/`, and the
+benchmark is `tests/bench_bossy.nim`. Host applications now use `import bossy`.
+The paths in the extraction table above record the original destinations.
+
 Polyworld retains its interpreter, tests, benchmarks, and imports. Adoption
 of this package in Polyworld and submission to the Nimble package index are
 separate future steps after review. This initial extraction does not claim

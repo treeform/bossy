@@ -1,7 +1,7 @@
 import
   std/strutils,
   basic,
-  test_controls, test_fixed, test_booleans, test_strings
+  test_controls, test_fixed, test_booleans, test_strings, test_determinism
 
 proc errorContains(
     action: proc() {.closure.},

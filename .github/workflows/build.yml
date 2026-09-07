@@ -44,6 +44,8 @@ jobs:
         run: nim r -d:danger tests/tests.nim
       - name: Test Fixxy overflow checks
         run: nim r -d:fixedChecks tests/tests.nim
+      - name: Test C++ determinism
+        run: nim cpp -r -d:release tests/tests.nim
       - name: Run examples
         run: |
           nim r examples/hello.nim

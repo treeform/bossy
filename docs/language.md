@@ -19,8 +19,9 @@ and an exponent magnitude of 512. Exponents are expanded using integer
 arithmetic and parsed by Fixxy. Out-of-range literals raise `BasicError`.
 Very small values round to zero.
 
-`Fixed` ranges from -32768 to 32767.9999847412109375, with a resolution of
-1/65536. Arithmetic and decimal parsing use the same rules as
+`Fixed` ranges from -32768 to just under 32768, with a step size of about
+0.00001526 (exactly 1/65536). Text output rounds values to five decimal places.
+Arithmetic and decimal parsing use the same rules as
 [Fixxy](https://github.com/treeform/fixxy). Multiplication and division round
 to nearest with ties toward positive infinity. Decimal input uses Fixxy's
 parser, which retains up to nine fractional decimal digits before rounding

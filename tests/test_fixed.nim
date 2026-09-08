@@ -1,6 +1,6 @@
 import
   std/strutils,
-  bossy
+  bassy
 
 proc errorContains(action: proc() {.closure.}, expected: string): bool =
   ## Checks that invalid numeric operations remain catchable BASIC errors.

@@ -1,6 +1,6 @@
 import
   std/strutils,
-  bossy
+  bassy
 
 proc execute(source: string): Runtime =
   ## Compiles and executes a control-flow example with default limits.

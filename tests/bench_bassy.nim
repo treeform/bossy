@@ -1,6 +1,6 @@
 import
   benchy,
-  bossy
+  bassy
 
 const
   ArithmeticIterations = 1_000_000

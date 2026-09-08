@@ -1,6 +1,6 @@
 import
   std/strutils,
-  bossy
+  bassy
 
 proc execute(source: string, disableFixed = false): Runtime =
   ## Runs a Boolean example with the requested numeric policy.

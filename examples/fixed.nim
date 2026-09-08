@@ -1,4 +1,4 @@
-import bossy
+import bassy
 
 proc advance(arguments: openArray[Value]): Value =
   ## Moves a coordinate using speed and elapsed time from the host.

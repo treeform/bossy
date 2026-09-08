@@ -1,6 +1,6 @@
 import
   std/strutils,
-  bossy,
+  bassy,
   test_controls, test_fixed, test_booleans, test_strings, test_determinism
 
 proc errorContains(

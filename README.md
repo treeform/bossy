@@ -1,12 +1,12 @@
-<img src="docs/bossyBanner.svg" alt="bossy, a fast, safe, deterministic VM for Nim">
+<img src="docs/bassyBanner.svg" alt="bassy, a fast, safe, deterministic VM for Nim">
 
-# Bossy - An embedded BASIC VM for games and untrusted scripts.
+# Bassy - An embedded BASIC VM for games and untrusted scripts.
 
-![GitHub Actions](https://github.com/treeform/bossy/workflows/Github%20Actions/badge.svg)
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/treeform/bossy)
-![GitHub Repo stars](https://img.shields.io/github/stars/treeform/bossy)
-![GitHub](https://img.shields.io/github/license/treeform/bossy)
-![GitHub issues](https://img.shields.io/github/issues/treeform/bossy)
+![GitHub Actions](https://github.com/treeform/bassy/workflows/Github%20Actions/badge.svg)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/treeform/bassy)
+![GitHub Repo stars](https://img.shields.io/github/stars/treeform/bassy)
+![GitHub](https://img.shields.io/github/license/treeform/bassy)
+![GitHub issues](https://img.shields.io/github/issues/treeform/bassy)
 
 Depends on [Fixxy](https://github.com/treeform/fixxy) for fixed-point math.
 
@@ -18,7 +18,7 @@ The second reason is AI assistance: there are just so many BASIC examples. BASIC
 
 The third reason is speed: BASIC ran on computers in the '80s that were running at something like 4 MHz. They were extremely slow. The language just doesn't give you that much. It is very, very simple and has very few features. That simplicity is part of what I wanted for a fast VM. The programs I want to run mainly use integers, simple functions, and `FOR` loops. There's no craziness going on.
 
-Why use Bossy's BASIC VM instead of something like Lua or WASM?
+Why use Bassy's BASIC VM instead of something like Lua or WASM?
 
 Well, I just never really got into Lua. I know Lua is used for almost this exact purpose, but I feel like it is just a little bit too modern. I'm not a fan of its combined hash table/array data structure because I think it has a lot of weirdness. It feels weird that arrays start at 1. There are just those things. It feels quite complicated to me, and it has syntax that I'm not familiar with. I'm just not a fan of Lua.
 
@@ -32,11 +32,11 @@ I also want to transfer code between different players. That code shouldn't be t
 
 ## QBasic compatibility
 
-Bossy keeps a lot of familiar QBasic syntax. Here is what carries over, what needs a little adjustment, and what belongs in the game hosting the VM.
+Bassy keeps a lot of familiar QBasic syntax. Here is what carries over, what needs a little adjustment, and what belongs in the game hosting the VM.
 
 🟢 **Same** means the listed syntax and usual behavior match. 🟠 **Different** means there are changes or host setup is needed. 🔴 **Not supported** means it is not built into the language. The numeric rules and resource limits below apply throughout.
 
-| Feature | Compatibility | Bossy support and notes |
+| Feature | Compatibility | Bassy support and notes |
 | --- | :---: | --- |
 | Assignment | 🟢 Same | `x = 10`, optional `LET`, and case-insensitive variable names and keywords. |
 | Comments and statement separators | 🟢 Same | Apostrophe and `REM` comments, with newlines or `:` between statements. |
@@ -60,26 +60,26 @@ Bossy keeps a lot of familiar QBasic syntax. Here is what carries over, what nee
 | Math, random numbers, and time | 🟠 Host setup | Numeric functions such as `ABS`, `SQR`, and `SIN`, plus randomness and time, must be supplied by the host. They are not built-ins. The host can expose deterministic math, seeded randomness, and simulation time. |
 | Execution and errors | 🟠 Different | Instructions, work, memory, output, and call depth are bounded. Errors and exhausted budgets raise `BasicError` for the host to handle. `END` and `STOP` finish the script; there is no interactive debugger to resume it. |
 | Files, operating system, and hardware | 🔴 Not supported | No `OPEN`, file I/O or file utilities, `SHELL`, or direct memory and hardware access such as `PEEK` and `POKE`. These are kept out so untrusted scripts cannot access the machine directly. |
-| Graphics, sound, and interactive input | 🔴 Not supported | No QBasic screen or drawing stack (`SCREEN`, `PSET`, `LINE`, `CIRCLE`, etc.), sound commands, or console input such as `INPUT` and `INKEY$`. Bossy is for embedded scripts; the host game owns rendering, audio, and player input. |
+| Graphics, sound, and interactive input | 🔴 Not supported | No QBasic screen or drawing stack (`SCREEN`, `PSET`, `LINE`, `CIRCLE`, etc.), sound commands, or console input such as `INPUT` and `INKEY$`. Bassy is for embedded scripts; the host game owns rendering, audio, and player input. |
 | Other QBasic language features | 🔴 Not supported | Grouped omissions include value-returning `FUNCTION` and `DEF FN`, user-defined `TYPE` records, `DATA`/`READ`/`RESTORE`, `ON ERROR`/`RESUME`, multidimensional arrays, fixed-length strings, `MID$` assignment, and `VAL`. |
 
-See [Bossy's language reference](docs/language.md) for the exact rules and [Microsoft's BASIC language reference](https://www.pcjs.org/documents/books/mspl13/basic/qblang/) for the original syntax and behavior.
+See [Bassy's language reference](docs/language.md) for the exact rules and [Microsoft's BASIC language reference](https://www.pcjs.org/documents/books/mspl13/basic/qblang/) for the original syntax and behavior.
 
 ## Install
 
-Clone with an account that has repository access. Run these commands from your Nimby workspace directory:
+Run these commands from your Nimby workspace directory:
 
 ```sh
-git clone git@github.com:treeform/bossy.git
-nimby install bossy/bossy.nimble
+git clone https://github.com/treeform/bassy.git
+nimby install bassy/bassy.nimble
 ```
 
-Installation also requires access to the private `treeform/fixxy` dependency. The optional benchmarks use `benchy`.
+Installation also pulls in the [Fixxy](https://github.com/treeform/fixxy) dependency. The optional benchmarks use `benchy`.
 
 ## Quick start
 
 ```nim
-import bossy
+import bassy
 
 block:
   let program = compile("answer = 6 * 7")
@@ -95,7 +95,7 @@ For BASIC `print` statements, pass a `PrintProc` to `run`. The default discards 
 Register read-only host data with `addData` and native functions with `addFunction`. Host functions accept `openArray[int32]`, return `int32`, and have a declared work cost. Compile against that host, then bind a compatible host when creating each runtime.
 
 ```nim
-import bossy
+import bassy
 
 proc double(arguments: openArray[int32]): int32 =
   ## Doubles an int32 with wrapping arithmetic.
@@ -163,17 +163,17 @@ Reset the pool between runs as appropriate. Handles are pool indices and are reu
 Build the API reference locally:
 
 ```sh
-nim doc --index:on --project --out:.gh-pages src/bossy.nim
+nim doc --index:on --project --out:.gh-pages src/bassy.nim
 ```
 
-Open `.gh-pages/bossy.html`. The Docs workflow also saves the generated API reference as a workflow artifact. Publishing with GitHub Pages is skipped while the repository is private.
+Open `.gh-pages/bassy.html`. The Docs workflow also saves the generated API reference as a workflow artifact and is configured to publish it to the `gh-pages` branch.
 
 ## Development
 
 From the repository root:
 
 ```sh
-nim check src/bossy.nim
+nim check src/bassy.nim
 nim r tests/tests.nim
 nim r -d:release tests/tests.nim
 nim r -d:fixedChecks tests/tests.nim
@@ -193,5 +193,5 @@ nimby install benchy
 Then run from the repository root:
 
 ```sh
-nim r -d:release tests/bench_bossy.nim
+nim r -d:release tests/bench_bassy.nim
 ```

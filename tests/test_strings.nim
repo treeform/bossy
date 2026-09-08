@@ -1,6 +1,6 @@
 import
   std/strutils,
-  bossy
+  bassy
 
 proc execute(source: string, limits = defaultLimits()): Runtime =
   ## Runs a native string example with bounded storage.

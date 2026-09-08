@@ -82,7 +82,7 @@ and `getDataValue` to read either numeric kind, then inspect `.kind`,
 Q16.16 range. `.asInt` requires an exact integer.
 
 Setters and `addData` accept integers or `Fixed` through `toValue` converters.
-`bossy` exports Fixxy, so host code can use `0.25'fx`, `fixed(3)`, and
+`bassy` exports Fixxy, so host code can use `0.25'fx`, `fixed(3)`, and
 `parseFixed("1.5")`. There is no implicit conversion from native floats to
 BASIC values. Any deliberate float conversion belongs in the host's input
 or output boundary, outside deterministic simulation code.

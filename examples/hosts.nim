@@ -1,4 +1,4 @@
-import bossy
+import bassy
 
 proc double(arguments: openArray[int32]): int32 =
   ## Doubles an int32 using the same wrapping arithmetic as BASIC.

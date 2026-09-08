@@ -30,6 +30,41 @@ I also want to transfer code between different players. That code shouldn't be t
 
 > **AI disclaimer: This package and its documentation were prepared with AI assistance.**
 
+## QBasic compatibility
+
+Bossy keeps a lot of familiar QBasic syntax. Here is what carries over, what needs a little adjustment, and what belongs in the game hosting the VM.
+
+🟢 **Same** means the listed syntax and usual behavior match. 🟠 **Different** means there are changes or host setup is needed. 🔴 **Not supported** means it is not built into the language. The numeric rules and resource limits below apply throughout.
+
+| Feature | Compatibility | Bossy support and notes |
+| --- | :---: | --- |
+| Assignment | 🟢 Same | `x = 10`, optional `LET`, and case-insensitive variable names and keywords. |
+| Comments and statement separators | 🟢 Same | Apostrophe and `REM` comments, with newlines or `:` between statements. |
+| Conditions | 🟢 Same | Single-line `IF ... THEN ... ELSE` and block `IF` with `ELSEIF`, `ELSE`, and `END IF`. |
+| Multiple-choice branches | 🟢 Same | `SELECT CASE`, value lists, `CASE ... TO ...` ranges, `CASE IS` comparisons, and `CASE ELSE`. |
+| Counted loops | 🟢 Same | `FOR ... TO ... STEP ... NEXT`, positive and negative steps, nested loops, `NEXT inner, outer`, and `EXIT FOR`. |
+| While loops | 🟢 Same | `WHILE ... WEND`. |
+| Do loops | 🟢 Same | `DO ... LOOP`, `WHILE` or `UNTIL` at either end, and `EXIT DO`. |
+| Labels and jumps | 🟢 Same | Named labels, line-number labels, `GOTO`, and `GOSUB ... RETURN` within the current procedure. |
+| Comparisons and Boolean logic | 🟢 Same | `=`, `<>`, `<`, `<=`, `>`, `>=`, and `NOT`, `AND`, `OR`, `XOR`, `EQV`, `IMP`. Comparisons return -1 for true and 0 for false. |
+| String expressions | 🟢 Same | `$` variables, quoted strings, doubled quotes inside literals, `+` concatenation, and case-sensitive comparisons. These work directly without host callbacks. |
+| String length, slicing, and searching | 🟢 Same | `LEN`, `LEFT$`, `RIGHT$`, `MID$`, and `INSTR`, including one-based positions. |
+| Character and text helpers | 🟢 Same | `CHR$`, `ASC`, `SPACE$`, `STRING$`, `UCASE$`, `LCASE$`, `LTRIM$`, and `RTRIM$` for byte strings and ASCII text. |
+| Numbers and fixed point | 🟠 Different | Numeric variables start as int32 zero and can hold int32 or Q16.16 fixed-point values. Decimals use fixed point, including `E` and `D` exponents. The decimal range is -32768 to just under 32768, in steps of 1/65536. There are no floating-point types, numeric type suffixes, or `AS` declarations. |
+| Arithmetic | 🟠 Different | `/` uses fixed point by default. `\` and `MOD` require exact integers and share precedence with `*` and `/`, unlike QBasic; parenthesize mixed expressions. Overflow wraps by default, and fixed-point rounding follows Fixxy. The `^` operator is not implemented. |
+| Arrays | 🟠 Different | `DIM a(n)` and `DIM a$(n)` create one-dimensional global arrays indexed from 0 through `n`. Declarations must be at top level with a literal upper bound. No custom lower bounds, `OPTION BASE`, or `REDIM`. |
+| Subroutines | 🟠 Different | `SUB ... END SUB`, `CALL`, `EXIT SUB`, and recursion are supported. Arguments are passed by value; other scalar variables are global. Calls use `name(args)` or `CALL name(args)`. Call depth is bounded. |
+| Computed jumps | 🟠 Different | `ON ... GOTO` and `ON ... GOSUB` select an exact one-based integer match without QBasic's rounding. Unmatched values, including negative selectors, fall through to the next statement. |
+| Output and numeric text | 🟠 Different | `PRINT` sends events to the host. Commas insert a space instead of a print zone; a trailing semicolon suppresses the newline. Fixed-point numbers use five decimal places, including through `STR$`. No `PRINT USING`. |
+| String storage | 🟠 Different | Strings have configurable count, byte, and length limits. New strings consume storage until `reset`, so repeated concatenation can hit a limit. `TRIM$` is also available as a convenience extension. |
+| Math, random numbers, and time | 🟠 Host setup | Numeric functions such as `ABS`, `SQR`, and `SIN`, plus randomness and time, must be supplied by the host. They are not built-ins. The host can expose deterministic math, seeded randomness, and simulation time. |
+| Execution and errors | 🟠 Different | Instructions, work, memory, output, and call depth are bounded. Errors and exhausted budgets raise `BasicError` for the host to handle. `END` and `STOP` finish the script; there is no interactive debugger to resume it. |
+| Files, operating system, and hardware | 🔴 Not supported | No `OPEN`, file I/O or file utilities, `SHELL`, or direct memory and hardware access such as `PEEK` and `POKE`. These are kept out so untrusted scripts cannot access the machine directly. |
+| Graphics, sound, and interactive input | 🔴 Not supported | No QBasic screen or drawing stack (`SCREEN`, `PSET`, `LINE`, `CIRCLE`, etc.), sound commands, or console input such as `INPUT` and `INKEY$`. Bossy is for embedded scripts; the host game owns rendering, audio, and player input. |
+| Other QBasic language features | 🔴 Not supported | Grouped omissions include value-returning `FUNCTION` and `DEF FN`, user-defined `TYPE` records, `DATA`/`READ`/`RESTORE`, `ON ERROR`/`RESUME`, multidimensional arrays, fixed-length strings, `MID$` assignment, and `VAL`. |
+
+See [Bossy's language reference](docs/language.md) for the exact rules and [Microsoft's BASIC language reference](https://www.pcjs.org/documents/books/mspl13/basic/qblang/) for the original syntax and behavior.
+
 ## Install
 
 Clone with an account that has repository access. Run these commands from your Nimby workspace directory:

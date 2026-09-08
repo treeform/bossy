@@ -1,0 +1,37 @@
+nimTitle	texts	bassy/texts.html	module bassy/texts		0
+nim	NoTextFunction	bassy/texts.html#NoTextFunction	TextFunction.NoTextFunction		6
+nim	LengthFunction	bassy/texts.html#LengthFunction	TextFunction.LengthFunction		6
+nim	LeftFunction	bassy/texts.html#LeftFunction	TextFunction.LeftFunction		6
+nim	RightFunction	bassy/texts.html#RightFunction	TextFunction.RightFunction		6
+nim	MidFunction	bassy/texts.html#MidFunction	TextFunction.MidFunction		6
+nim	UpperFunction	bassy/texts.html#UpperFunction	TextFunction.UpperFunction		6
+nim	LowerFunction	bassy/texts.html#LowerFunction	TextFunction.LowerFunction		6
+nim	TrimFunction	bassy/texts.html#TrimFunction	TextFunction.TrimFunction		6
+nim	LeftTrimFunction	bassy/texts.html#LeftTrimFunction	TextFunction.LeftTrimFunction		6
+nim	RightTrimFunction	bassy/texts.html#RightTrimFunction	TextFunction.RightTrimFunction		6
+nim	CharacterFunction	bassy/texts.html#CharacterFunction	TextFunction.CharacterFunction		6
+nim	CodeFunction	bassy/texts.html#CodeFunction	TextFunction.CodeFunction		6
+nim	SpaceFunction	bassy/texts.html#SpaceFunction	TextFunction.SpaceFunction		6
+nim	RepeatFunction	bassy/texts.html#RepeatFunction	TextFunction.RepeatFunction		6
+nim	FindFunction	bassy/texts.html#FindFunction	TextFunction.FindFunction		6
+nim	FormatFunction	bassy/texts.html#FormatFunction	TextFunction.FormatFunction		6
+nim	TextFunction	bassy/texts.html#TextFunction	enum TextFunction		6
+nim	TextStorage	bassy/texts.html#TextStorage	object TextStorage		28
+nim	textFunction	bassy/texts.html#textFunction,string	proc textFunction(name: string): TextFunction		55
+nim	storageBytes	bassy/texts.html#storageBytes,int,int	proc storageBytes(count, bytes: int): int64		75
+nim	initTextStorage	bassy/texts.html#initTextStorage,int,int,int	proc initTextStorage(count, bytes, length: int): TextStorage		79
+nim	empty	bassy/texts.html#empty,TextStorage	proc empty(storage: TextStorage): Value		95
+nim	length	bassy/texts.html#length,TextStorage,Value	proc length(storage: TextStorage; value: Value): int		107
+nim	get	bassy/texts.html#get,TextStorage,Value	proc get(storage: TextStorage; value: Value): string		111
+nim	count	bassy/texts.html#count,TextStorage	proc count(storage: TextStorage): int		117
+nim	bytesUsed	bassy/texts.html#bytesUsed,TextStorage	proc bytesUsed(storage: TextStorage): int		121
+nim	put	bassy/texts.html#put,TextStorage,string	proc put(storage: var TextStorage; text: string): Value		136
+nim	concat	bassy/texts.html#concat,TextStorage,Value,Value	proc concat(storage: var TextStorage; left, right: Value): Value		150
+nim	compare	bassy/texts.html#compare,TextStorage,Value,Value	proc compare(storage: TextStorage; left, right: Value): int		173
+nim	slice	bassy/texts.html#slice,TextStorage,Value,int,int	proc slice(storage: var TextStorage; value: Value; start, length: int): Value		187
+nim	repeated	bassy/texts.html#repeated,TextStorage,int,char	proc repeated(storage: var TextStorage; count: int; character: char): Value		204
+nim	character	bassy/texts.html#character,TextStorage,Value	proc character(storage: TextStorage; value: Value): char		219
+nim	mapped	bassy/texts.html#mapped,TextStorage,Value,bool	proc mapped(storage: var TextStorage; value: Value; upper: bool): Value		226
+nim	trimmed	bassy/texts.html#trimmed,TextStorage,Value,bool,bool	proc trimmed(storage: var TextStorage; value: Value; left, right: bool): Value		245
+nim	find	bassy/texts.html#find,TextStorage,Value,Value,int	proc find(storage: TextStorage; haystack, needle: Value; start: int): int		263
+nim	reset	bassy/texts.html#reset,TextStorage,seq[Value]	proc reset(storage: var TextStorage; roots: var seq[Value])		283
